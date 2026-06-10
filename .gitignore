@@ -1,0 +1,11 @@
+.venv/
+__pycache__/
+*.pyc
+models/
+*.gguf
+*.db
+*.db-wal
+*.db-shm
+.chroma/
+.pytest_cache/
+dist/

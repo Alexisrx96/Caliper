@@ -1,0 +1,28 @@
+[project]
+name = "lce"
+version = "0.1.0"
+description = "Lean Context Engine — token-efficient harness for local SLMs"
+requires-python = ">=3.11"
+dependencies = [
+    "llama-cpp-python>=0.3.0",
+    "chromadb>=0.5.0",
+    "typer>=0.12.0",
+    "huggingface_hub>=0.23.0",
+]
+
+[dependency-groups]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+lce = "lce.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["lce"]
+
+[tool.pytest.ini_options]
+markers = ["gpu: requires CUDA GPU and downloaded model"]
+addopts = "-m 'not gpu'"
