@@ -3,6 +3,6 @@
 root ::= "{" ws "\"action\"" ws ":" ws action ws "," ws "\"target\"" ws ":" ws string ws "," ws "\"confidence\"" ws ":" ws confidence ws "}"
 action ::= "\"open_file\"" | "\"search_code\"" | "\"explain\"" | "\"none\""
 string ::= "\"" char* "\""
-char ::= [^"\\] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
+char ::= [^"\\\x7F\x00-\x1F] | "\\" (["\\/bfnrt] | "u" [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F] [0-9a-fA-F])
 confidence ::= "0" ("." [0-9]+)? | "1" (".0")?
 ws ::= [ \t\n]*
