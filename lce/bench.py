@@ -5,6 +5,7 @@ the engine are injectable so tests can run without a GPU.
 """
 from __future__ import annotations
 
+import sqlite3
 import statistics
 import sys
 import time
@@ -60,6 +61,14 @@ def run_benchmark(
 
     Logs every transaction to `db_path`, prints the comparison table, and
     returns the per-arm aggregate dict (see _aggregate).
+
+    Statistical notes: prompt_tokens is identical across reps for a given
+    (query, arm), so prompt_savings_pct has an effective sample size of
+    len(QUERY_BATTERY) per arm — reps only add samples to the generation-side
+    metrics (ttft, latency, format_success), which are non-deterministic
+    (no seed pinning). The Engine never enables llama.cpp's prompt cache, so
+    rep order does not bias TTFT; if caching is ever enabled, reps must be
+    tagged in telemetry or TTFT means will silently mix cache hits/misses.
     """
     if run_id is None:
         run_id = time.strftime("bench-%Y%m%d-%H%M%S")
@@ -101,8 +110,6 @@ def run_benchmark(
 def _aggregate(db_path: str | Path, run_id: str) -> dict[str, dict[str, float]]:
     """Per-arm stats: n, prompt_tokens_mean, prompt_savings_pct (vs naive),
     ttft_ms_mean, ttft_ms_p50, total_ms_mean, format_success_rate."""
-    import sqlite3
-
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
