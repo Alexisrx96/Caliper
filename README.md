@@ -22,10 +22,22 @@ Cada transacción se registra en `experiment_logs.db` (SQLite, WAL):
 `format_success`. Tres brazos de benchmark: **naive** (chunks crudos),
 **lean** (esqueletos, sin gramática) y **lean_grammar** (esqueletos + GBNF).
 
+## Uso (CLI)
+```bash
+uv run lce index .                      # indexa .py/.md en colecciones raw + skeleton
+uv run lce ask "¿dónde está el esquema de telemetría?"          # lean + GBNF (default)
+uv run lce ask "..." --no-grammar       # brazo lean (solo prompt)
+uv run lce ask "..." --mode naive       # brazo naive (chunks crudos)
+uv run lce bench                        # batería 15 consultas × 3 brazos × 3 reps
+```
+`lce ask` imprime el JSON de enrutamiento por stdout y la línea de métricas
+(tokens, TTFT, total) por stderr — componible con pipes (`| jq .action`).
+
 ## Replicar
 1. Linux con CUDA, ≥16GB RAM, ≥6GB VRAM.
 2. `./scripts/setup_env.sh` — compila llama-cpp-python (cuBLAS) y descarga
    Qwen2.5-3B-Instruct Q4_K_M.
-3. `uv run pytest` (unit) · `uv run pytest -m gpu` (smoke/benchmark).
+3. `uv run pytest` (unit) · `uv run pytest -m gpu` (smoke/e2e/benchmark).
 
-Diseño completo: `docs/superpowers/specs/2026-06-09-lce-foundation-design.md`.
+Diseño: `docs/superpowers/specs/2026-06-09-lce-foundation-design.md` (fase 1)
+y `docs/superpowers/specs/2026-06-09-lce-phase2-pipeline-design.md` (fase 2).
