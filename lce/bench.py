@@ -66,9 +66,10 @@ def run_benchmark(
     (query, arm), so prompt_savings_pct has an effective sample size of
     len(QUERY_BATTERY) per arm — reps only add samples to the generation-side
     metrics (ttft, latency, format_success), which are non-deterministic
-    (no seed pinning). The Engine never enables llama.cpp's prompt cache, so
-    rep order does not bias TTFT; if caching is ever enabled, reps must be
-    tagged in telemetry or TTFT means will silently mix cache hits/misses.
+    (no seed pinning). The Engine resets the llama context before every
+    generation, defeating llama.cpp's prefix-match KV reuse — without that
+    reset, identical prompts measured ~10x faster TTFT on back-to-back calls,
+    biasing arm and rep comparisons by run order.
     """
     if run_id is None:
         run_id = time.strftime("bench-%Y%m%d-%H%M%S")

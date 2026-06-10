@@ -30,6 +30,10 @@ class _FakeLlama:
 
     def __init__(self, texts):
         self._texts = texts
+        self.reset_calls = 0
+
+    def reset(self):
+        self.reset_calls += 1
 
     def tokenize(self, data, special=True):
         return list(range(7))  # 7 prompt tokens
@@ -52,6 +56,7 @@ def test_generate_counts_exclude_finish_sentinel(tmp_path):
     assert result.prompt_tokens == 7
     assert result.ttft_ms > 0
     assert result.total_ms >= result.ttft_ms
+    assert engine._llm.reset_calls == 1  # context reset: TTFT must not depend on call order
 
 
 def test_generate_zero_tokens_ttft_falls_back_to_total(tmp_path):

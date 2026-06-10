@@ -83,11 +83,18 @@ class Engine:
           Grammar compilation is cached per path and excluded by design.
         - total_ms: time from generation start to stream end. Falls back as
           ttft_ms when zero tokens are generated (immediate EOS).
+
+        The llama context is reset before each call: Llama.generate otherwise
+        reuses the KV state for common prompt prefixes, which made TTFT depend
+        on call order (identical prompts measured ~10x faster on the second
+        call). Resetting makes every transaction pay its full prompt eval, so
+        ttft_ms is comparable across arms and reps.
         """
         grammar = self._load_grammar(grammar_path) if grammar_path is not None else None
         # special=True matches _create_completion's internal tokenization of
         # string prompts, so this count equals what the model actually evaluates.
         prompt_tokens = len(self._llm.tokenize(prompt.encode("utf-8"), special=True))
+        self._llm.reset()  # defeat prefix-match KV reuse (see docstring)
         pieces: list[str] = []
         completion_tokens = 0
         ttft_ms: float | None = None
