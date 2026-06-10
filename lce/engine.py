@@ -55,6 +55,16 @@ class Engine:
                 f"Original error: {exc}"
             ) from exc
 
+        self._grammar_cache: dict[Path, "LlamaGrammar"] = {}
+
+    def _load_grammar(self, grammar_path: str | Path) -> "LlamaGrammar":
+        from llama_cpp import LlamaGrammar
+
+        path = Path(grammar_path)
+        if path not in self._grammar_cache:
+            self._grammar_cache[path] = LlamaGrammar.from_string(path.read_text())
+        return self._grammar_cache[path]
+
     def generate(
         self,
         prompt: str,
@@ -62,14 +72,22 @@ class Engine:
         grammar_path: str | Path | None = None,
         max_tokens: int = 256,
     ) -> GenerationResult:
-        grammar = None
-        if grammar_path is not None:
-            from llama_cpp import LlamaGrammar
+        """Stream a completion and measure it.
 
-            grammar = LlamaGrammar.from_string(
-                Path(grammar_path).read_text()
-            )
-        prompt_tokens = len(self._llm.tokenize(prompt.encode("utf-8")))
+        Measurement semantics (foundation spec §5):
+        - prompt_tokens: llama.cpp tokenization (special=True) of `prompt`,
+          identical to what create_completion evaluates.
+        - completion_tokens: count of streamed content chunks (one per token);
+          the trailing finish_reason sentinel chunk is excluded.
+        - ttft_ms: time from generation start to the first content chunk.
+          Grammar compilation is cached per path and excluded by design.
+        - total_ms: time from generation start to stream end. Falls back as
+          ttft_ms when zero tokens are generated (immediate EOS).
+        """
+        grammar = self._load_grammar(grammar_path) if grammar_path is not None else None
+        # special=True matches _create_completion's internal tokenization of
+        # string prompts, so this count equals what the model actually evaluates.
+        prompt_tokens = len(self._llm.tokenize(prompt.encode("utf-8"), special=True))
         pieces: list[str] = []
         completion_tokens = 0
         ttft_ms: float | None = None
@@ -77,9 +95,12 @@ class Engine:
         for chunk in self._llm.create_completion(
             prompt, max_tokens=max_tokens, grammar=grammar, stream=True
         ):
+            choice = chunk["choices"][0]
+            if choice["finish_reason"] is not None:
+                continue  # trailing sentinel chunk, not a generated token
             if ttft_ms is None:
                 ttft_ms = (time.perf_counter() - start) * 1000.0
-            pieces.append(chunk["choices"][0]["text"])
+            pieces.append(choice["text"])
             completion_tokens += 1
         total_ms = (time.perf_counter() - start) * 1000.0
         return GenerationResult(

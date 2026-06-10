@@ -23,3 +23,42 @@ def test_missing_model_raises_friendly_error(tmp_path):
 )
 def test_validate_routing_output(text, expected):
     assert validate_routing_output(text) is expected
+
+
+class _FakeLlama:
+    """Mimics llama_cpp.Llama streaming: N content chunks + finish sentinel."""
+
+    def __init__(self, texts):
+        self._texts = texts
+
+    def tokenize(self, data, special=True):
+        return list(range(7))  # 7 prompt tokens
+
+    def create_completion(self, prompt, *, max_tokens, grammar, stream):
+        for t in self._texts:
+            yield {"choices": [{"text": t, "finish_reason": None}]}
+        yield {"choices": [{"text": "", "finish_reason": "stop"}]}
+
+
+def test_generate_counts_exclude_finish_sentinel(tmp_path):
+    model = tmp_path / "fake.gguf"
+    model.touch()
+    engine = Engine.__new__(Engine)  # bypass __init__: no real model load
+    engine._llm = _FakeLlama(["a", "b", "c"])
+    engine._grammar_cache = {}
+    result = engine.generate("hi")
+    assert result.text == "abc"
+    assert result.completion_tokens == 3
+    assert result.prompt_tokens == 7
+    assert result.ttft_ms > 0
+    assert result.total_ms >= result.ttft_ms
+
+
+def test_generate_zero_tokens_ttft_falls_back_to_total(tmp_path):
+    engine = Engine.__new__(Engine)
+    engine._llm = _FakeLlama([])
+    engine._grammar_cache = {}
+    result = engine.generate("hi")
+    assert result.completion_tokens == 0
+    assert result.text == ""
+    assert result.ttft_ms == result.total_ms
