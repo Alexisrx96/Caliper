@@ -1,28 +1,21 @@
-"""Three-arm benchmark: naive / lean / lean_grammar. Foundation spec §7.
+"""Three-arm benchmark suite — logic lives in lce.bench (spec §6).
 
-The battery is fixed here so every run measures the same workload; the
-runner is implemented in phase 2 once indexer/retriever exist.
+This file stays at tests/benchmark_suite.py because the README's
+replicability steps reference it; it re-exports the battery and runner.
 """
 import pytest
 
-QUERY_BATTERY = [
-    "Where is the telemetry transaction schema defined?",
-    "Which function extracts the AST skeleton from a Python file?",
-    "How does the engine enforce the routing grammar?",
-    "What CLI command runs the benchmark?",
-    "Which module owns the ChromaDB collection names?",
-]
-
-ARMS = ("naive", "lean", "lean_grammar")
-
-
-def run_benchmark(run_id: str) -> None:
-    """Run QUERY_BATTERY x ARMS under one run_id, log to experiment_logs.db,
-    print mean prompt tokens, % savings vs naive, TTFT, latency, and
-    format-success rate per arm."""
-    raise NotImplementedError("phase 2 — foundation spec §7")
+from lce.bench import ARMS, QUERY_BATTERY, run_benchmark  # noqa: F401
 
 
 @pytest.mark.gpu
-def test_benchmark_suite():
-    pytest.skip("phase 2 — requires implemented indexer/retriever (spec §9)")
+def test_benchmark_suite(tmp_path):
+    aggregates = run_benchmark(
+        "bench-suite-test",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        reps=1,
+    )
+    assert set(aggregates) == set(ARMS)
+    for stats in aggregates.values():
+        assert stats["n"] == len(QUERY_BATTERY)
