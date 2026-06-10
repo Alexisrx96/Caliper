@@ -73,9 +73,10 @@ def test_ask_mode_mapping(tmp_path, monkeypatch):
         ([], "lean_grammar", True),
         (["--no-grammar"], "lean", False),
         (["--mode", "naive"], "naive", False),
+        (["--mode", "naive", "--no-grammar"], "naive", False),
     ]
-    for extra, expected_mode, expect_grammar in cases:
-        db = tmp_path / f"{expected_mode}.db"
+    for i, (extra, expected_mode, expect_grammar) in enumerate(cases):
+        db = tmp_path / f"case{i}.db"
         result = runner.invoke(
             app,
             ["ask", "q", "--persist-dir", str(persist), "--db", str(db), *extra],

@@ -38,11 +38,11 @@ def index(
 @app.command()
 def ask(
     query: str,
-    mode: str = typer.Option("lean", help="naive | lean"),
+    mode: str = typer.Option("lean", help="naive | lean (lean + grammar default = telemetry mode 'lean_grammar')"),
     grammar: Optional[bool] = typer.Option(
         None,
         "--grammar/--no-grammar",
-        help="GBNF-constrained decoding (lean only; default on)",
+        help="GBNF-constrained decoding (lean only; default on; --no-grammar is a no-op with naive)",
     ),
     k: int = typer.Option(3, help="retrieved documents"),
     model: Path = typer.Option(_DEFAULT_MODEL, help="GGUF model path"),
