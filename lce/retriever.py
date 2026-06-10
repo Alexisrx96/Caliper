@@ -48,8 +48,13 @@ class Retriever:
         skeleton: str,
         metadata: dict | None = None,
     ) -> None:
-        """Store `raw` (chunked) and `skeleton` (whole) under `doc_id`."""
+        """Store `raw` (chunked) and `skeleton` (whole) under `doc_id`.
+
+        Existing records for `doc_id` are removed first so re-indexing a
+        shrunk document leaves no stale chunks behind.
+        """
         meta = _flatten(metadata or {}) | {"source_id": doc_id}
+        self._collections[RAW_COLLECTION].delete(where={"source_id": doc_id})
         chunks = _chunk(raw)
         self._collections[RAW_COLLECTION].upsert(
             ids=[f"{doc_id}#{i}" for i in range(len(chunks))],

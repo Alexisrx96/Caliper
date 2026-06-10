@@ -65,3 +65,15 @@ def test_invalid_mode_raises(tmp_path):
 
 def test_empty_query_returns_empty(tmp_path):
     assert _make(tmp_path).query("anything") == []
+
+
+def test_reindex_shrunk_document_leaves_no_stale_chunks(tmp_path):
+    r = _make(tmp_path)
+    long_raw = "\n\n".join(f"paragraph {i} " + "word " * 60 for i in range(12))
+    r.index_document(doc_id="doc.md", raw=long_raw, skeleton="title: Doc")
+    assert r.count("naive") > 1
+    r.index_document(doc_id="doc.md", raw="now tiny", skeleton="title: Doc")
+    assert r.count("naive") == 1
+    (only,) = r.query("paragraph words tiny", mode="naive", k=5)
+    assert only.doc_id == "doc.md#0"
+    assert only.text == "now tiny"
