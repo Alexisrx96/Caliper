@@ -59,9 +59,13 @@ class TransactionRecord:
 class TelemetryDB:
     def __init__(self, path: str | Path = "experiment_logs.db") -> None:
         self.path = Path(path)
-        with sqlite3.connect(self.path) as conn:
-            conn.execute("PRAGMA journal_mode=WAL")
-            conn.executescript(_SCHEMA)
+        conn = sqlite3.connect(self.path)
+        try:
+            with conn:
+                conn.execute("PRAGMA journal_mode=WAL")
+                conn.executescript(_SCHEMA)
+        finally:
+            conn.close()
 
     @contextmanager
     def record(self, *, run_id: str, mode: str, model: str, query: str):
@@ -73,27 +77,32 @@ class TelemetryDB:
         finally:
             total_ms = (time.perf_counter() - start) * 1000.0
             try:
-                with sqlite3.connect(self.path) as conn:
-                    conn.execute(
-                        "INSERT INTO transactions (run_id, ts, mode, model,"
-                        " query, prompt_tokens, completion_tokens, ttft_ms,"
-                        " total_latency_ms, format_success, response)"
-                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                        (
-                            run_id,
-                            ts,
-                            mode,
-                            model,
-                            query,
-                            rec.prompt_tokens,
-                            rec.completion_tokens,
-                            rec.ttft_ms,
-                            total_ms,
-                            None
-                            if rec.format_success is None
-                            else int(rec.format_success),
-                            rec.response,
-                        ),
-                    )
+                conn = sqlite3.connect(self.path)
+                try:
+                    with conn:
+                        conn.execute(
+                            "INSERT INTO transactions (run_id, ts, mode,"
+                            " model, query, prompt_tokens,"
+                            " completion_tokens, ttft_ms, total_latency_ms,"
+                            " format_success, response)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            (
+                                run_id,
+                                ts,
+                                mode,
+                                model,
+                                query,
+                                rec.prompt_tokens,
+                                rec.completion_tokens,
+                                rec.ttft_ms,
+                                total_ms,
+                                None
+                                if rec.format_success is None
+                                else int(rec.format_success),
+                                rec.response,
+                            ),
+                        )
+                finally:
+                    conn.close()
             except sqlite3.Error as exc:
                 print(f"[telemetry] write failed: {exc}", file=sys.stderr)
