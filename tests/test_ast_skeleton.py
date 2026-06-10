@@ -47,3 +47,39 @@ def test_no_docstrings():
 def test_syntax_error_propagates():
     with pytest.raises(SyntaxError):
         extract_skeleton("def broken(:\n")
+
+
+def test_conditionally_defined_symbols_are_kept():
+    src = (
+        "try:\n"
+        "    def fast_path() -> int:\n"
+        '        """Optimized."""\n'
+        "        return 1\n"
+        "except ImportError:\n"
+        "    def fast_path() -> int:\n"
+        "        return 2\n"
+        "if True:\n"
+        "    class Conditional:\n"
+        '        """Sometimes defined."""\n'
+        "        pass\n"
+    )
+    out = extract_skeleton(src)
+    assert out.count("def fast_path() -> int:") == 2
+    assert "class Conditional:" in out
+    assert '    """Sometimes defined."""' in out
+
+
+def test_constants_only_module_yields_empty_skeleton():
+    assert extract_skeleton("X = 1\nY = 'two'\n") == ""
+
+
+def test_decorated_method_signature_kept_decorator_dropped():
+    src = (
+        "class C:\n"
+        "    @property\n"
+        "    def value(self) -> int:\n"
+        "        return 1\n"
+    )
+    out = extract_skeleton(src)
+    assert "    def value(self) -> int:" in out
+    assert "@property" not in out

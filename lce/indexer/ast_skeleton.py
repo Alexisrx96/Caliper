@@ -17,6 +17,9 @@ def extract_skeleton(source: str, *, filename: str = "<unknown>") -> str:
     (decorators omitted) with its docstring first line, indented to reflect
     nesting. Bodies are discarded. Raises SyntaxError on unparseable source
     (the caller skips the file, spec §8).
+
+    Returns "" for sources with no docstring and no def/class (the indexer
+    substitutes a filename line, see lce.indexer.index_tree).
     """
     tree = ast.parse(source, filename=filename)
     lines: list[str] = []
@@ -31,6 +34,18 @@ def _walk(body: list[ast.stmt], lines: list[str], *, depth: int) -> None:
             lines.append(_INDENT * depth + _signature_line(node))
             _append_docstring(node, lines, depth=depth + 1)
             _walk(node.body, lines, depth=depth + 1)
+        else:
+            # Recurse into compound statements (if/try/for/while/with...) at
+            # the same depth so conditionally-defined symbols are kept.
+            for field in ("body", "orelse", "finalbody", "handlers"):
+                children = getattr(node, field, None)
+                if not children:
+                    continue
+                for child in children:
+                    if isinstance(child, ast.excepthandler):
+                        _walk(child.body, lines, depth=depth)
+                    else:
+                        _walk([child], lines, depth=depth)
 
 
 def _signature_line(node: ast.AST) -> str:
