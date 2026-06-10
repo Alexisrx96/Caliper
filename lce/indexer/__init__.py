@@ -11,6 +11,8 @@ from pathlib import Path
 from lce.indexer.ast_skeleton import extract_skeleton
 from lce.indexer.markdown_meta import extract_metadata
 
+# Matched against every path component — a source dir literally named "models"
+# or "dist" anywhere in the tree is also excluded (acceptable for this experiment).
 _EXCLUDED_DIRS = {
     ".git",
     ".venv",
@@ -47,7 +49,7 @@ def index_tree(retriever, root: str | Path) -> tuple[int, int]:
                 md = extract_metadata(text)
                 skeleton = _markdown_skeleton(md)
                 metadata = {"path": rel, "kind": "doc", "title": md["title"] or ""}
-        except (SyntaxError, UnicodeDecodeError) as exc:
+        except (SyntaxError, UnicodeDecodeError, OSError) as exc:
             print(f"[index] skipped {rel}: {exc}", file=sys.stderr)
             skipped += 1
             continue
@@ -63,6 +65,5 @@ def index_tree(retriever, root: str | Path) -> tuple[int, int]:
 
 def _markdown_skeleton(md: dict) -> str:
     lines = [f"title: {md['title']}"] if md["title"] else []
-    lines += [f"{'#' * h['level']} {h['text']}" for h in md["headers"]]
     lines += [f"{s['header']}: {s['summary']}" for s in md["sections"]]
     return "\n".join(lines)

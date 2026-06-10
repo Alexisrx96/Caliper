@@ -35,6 +35,40 @@ def test_excludes_dot_and_artifact_dirs(tmp_path):
     assert (indexed, skipped) == (1, 0)
 
 
+def test_markdown_skeleton_is_lean(tmp_path):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "note.md").write_text(
+        "# Big Title\n\nIntro text.\n\n## Alpha\n\nAlpha body.\n\n## Beta\n\nBeta body.\n"
+    )
+    r = Retriever(tmp_path / "chroma")
+    index_tree(r, tree)
+    (doc,) = r.query("alpha", mode="lean", k=1)
+    assert doc.text == (
+        "title: Big Title\n"
+        "Big Title: Intro text.\n"
+        "Alpha: Alpha body.\n"
+        "Beta: Beta body."
+    )
+    assert "#" not in doc.text
+
+
+def test_unreadable_file_is_skipped(tmp_path, capsys):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "ok.py").write_text("def f():\n    pass\n")
+    secret = tree / "secret.py"
+    secret.write_text("def s():\n    pass\n")
+    secret.chmod(0o000)
+    r = Retriever(tmp_path / "chroma")
+    try:
+        indexed, skipped = index_tree(r, tree)
+    finally:
+        secret.chmod(0o644)
+    assert (indexed, skipped) == (1, 1)
+    assert "secret.py" in capsys.readouterr().err
+
+
 def test_constants_only_python_gets_filename_skeleton(tmp_path):
     tree = tmp_path / "tree"
     tree.mkdir()
