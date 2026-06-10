@@ -1,9 +1,48 @@
-"""Phase-1 contract: stub exists with the final signature."""
-import pytest
+"""extract_metadata: frontmatter, title, headers, section summaries."""
+from pathlib import Path
 
 from lce.indexer.markdown_meta import extract_metadata
 
+FIXTURE = Path("tests/fixtures/sample.md")
 
-def test_stub_raises_not_implemented():
-    with pytest.raises(NotImplementedError, match="phase 2"):
-        extract_metadata("# Title\n")
+
+def test_fixture_metadata():
+    md = extract_metadata(FIXTURE.read_text())
+    assert md["title"] == "Sample Note"
+    assert md["frontmatter"] == {"title": "Sample Note", "tags": ["lce", "fixture"]}
+    assert md["headers"] == [
+        {"level": 1, "text": "Sample Note"},
+        {"level": 2, "text": "Section One"},
+        {"level": 2, "text": "Section Two"},
+    ]
+    assert md["sections"] == [
+        {"header": "Sample Note", "summary": "Intro paragraph."},
+        {"header": "Section One", "summary": "Body text one."},
+        {"header": "Section Two", "summary": "Body text two."},
+    ]
+
+
+def test_no_frontmatter():
+    md = extract_metadata("# Title\n\nBody.\n")
+    assert md["title"] == "Title"
+    assert md["frontmatter"] == {}
+
+
+def test_frontmatter_title_fallback():
+    md = extract_metadata("---\ntitle: From FM\n---\n\nNo headers here.\n")
+    assert md["title"] == "From FM"
+    assert md["headers"] == []
+
+
+def test_empty_text():
+    assert extract_metadata("") == {
+        "title": None,
+        "frontmatter": {},
+        "headers": [],
+        "sections": [],
+    }
+
+
+def test_summary_truncated_at_200_chars():
+    md = extract_metadata("# H\n\n" + "x" * 500 + "\n")
+    assert len(md["sections"][0]["summary"]) == 200
