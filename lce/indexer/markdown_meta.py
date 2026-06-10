@@ -2,6 +2,9 @@
 
 Foundation spec §4. Frontmatter parsing is deliberately minimal (key: value
 pairs and [a, b] lists, no nesting) to avoid a yaml dependency.
+
+Note: only ATX headers (`#` ... `######`) are recognized; setext headers
+(underlined with `===`/`---`) are not.
 """
 from __future__ import annotations
 
@@ -21,7 +24,14 @@ def extract_metadata(text: str) -> dict:
     headers: list[dict] = []
     sections: list[dict] = []
     lines = body.splitlines()
+    in_fence = False
     for i, line in enumerate(lines):
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            in_fence = not in_fence
+            continue
+        if in_fence:
+            continue
         m = _HEADER_RE.match(line)
         if m:
             header_text = m.group(2).strip()
@@ -68,6 +78,9 @@ def _parse_value(value: str):
 def _first_paragraph(lines: list[str], start: int) -> str:
     paragraph: list[str] = []
     for line in lines[start:]:
+        stripped = line.lstrip()
+        if stripped.startswith("```") or stripped.startswith("~~~"):
+            break  # code block: not prose, end of summary candidates
         if _HEADER_RE.match(line):
             break
         if line.strip():
