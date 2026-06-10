@@ -26,3 +26,4 @@ packages = ["lce"]
 [tool.pytest.ini_options]
 markers = ["gpu: requires CUDA GPU and downloaded model"]
 addopts = "-m 'not gpu'"
+python_files = ["test_*.py", "benchmark_suite.py"]
