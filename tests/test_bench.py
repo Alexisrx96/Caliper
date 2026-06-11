@@ -122,3 +122,8 @@ def test_corpus_compression_per_kind(tmp_path):
 
 def test_corpus_compression_empty_index(tmp_path):
     assert corpus_compression(Retriever(tmp_path / "chroma")) == {}
+
+
+def test_battery_has_30_unique_queries():
+    assert len(QUERY_BATTERY) == 30
+    assert len(set(QUERY_BATTERY)) == 30

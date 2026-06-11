@@ -20,24 +20,39 @@ from lce.telemetry import TelemetryDB
 GRAMMAR_PATH = Path("lce/grammars/router.gbnf")
 
 QUERY_BATTERY = [
-    # navigation
+    # navigation (10)
     "Where is the telemetry transaction schema defined?",
     "Which function extracts the AST skeleton from a Python file?",
     "Open the module that builds the ChatML prompts.",
     "Where are the ChromaDB collection names declared?",
     "Which script downloads the GGUF model?",
-    # lookup
+    "Where is the markdown frontmatter parsed?",
+    "Which module defines the RetrievedDoc dataclass?",
+    "Where is the fixed query battery for the benchmark defined?",
+    "Which file contains the GBNF routing grammar?",
+    "Where is the prompt-token savings percentage computed?",
+    # lookup (10)
     "What CLI command runs the benchmark?",
     "What are the columns of the transactions table?",
     "What is the default context size of the engine?",
     "Which pytest marker excludes GPU tests?",
     "What actions does the routing grammar allow?",
-    # explanation
+    "What is the default number of repetitions per query in the benchmark?",
+    "What is the chunk size limit for raw documents?",
+    "What exit code does the CLI use for invalid arguments?",
+    "Which directories does the indexer always exclude?",
+    "What embedding model does the retriever use?",
+    # explanation (10)
     "How does the engine enforce the routing grammar?",
     "How does the retriever keep naive and lean comparisons fair?",
     "How is TTFT measured during generation?",
     "Why are embeddings computed on CPU instead of GPU?",
     "How does telemetry avoid crashing an inference run?",
+    "How does the indexer decide which files to skip?",
+    "How are oversized documents split into chunks?",
+    "Why does the engine reset the llama context before each generation?",
+    "How does the CLI map the mode and grammar flags to telemetry modes?",
+    "How does re-indexing avoid leaving stale chunks behind?",
 ]
 
 ARMS = ("naive", "lean", "lean_grammar")
