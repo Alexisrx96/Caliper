@@ -1,7 +1,10 @@
 # LCE Phase 4 — Honest Benchmarking & Cheap Constrained Decoding Design
 
 **Date:** 2026-06-11
-**Status:** Approved (pending final spec review)
+**Status:** Approved — amended same day: the grammar fix pivoted from
+approach A (post-top-k mask + validate-retry net) to approach B
+(sample-then-validate decode loop) after Task-4 verification falsified A
+(see §1 and §4); the user approved the pivot.
 **Builds on:** Phase 3 (`docs/superpowers/specs/2026-06-10-lce-phase3-compression-design.md`) and the phase-4 latency investigation (engram observation #14; summary in §1).
 **Scope:** Make benchmark numbers trustworthy (machine-state instrumentation + battery gate) and eliminate the structural cost of grammar-constrained decoding (post-top-k masking + safety net). Ends with a controlled before/after re-run and a findings.md correction.
 
@@ -33,6 +36,19 @@ phase-4 investigation (2026-06-11) resolved the flag:
 Phase 4 fixes both: numbers that announce their own machine state, and a
 grammar arm whose per-token cost matches lean.
 
+**Execution-time falsification (2026-06-11, during Task 4):** the originally
+chosen approach A (grammar sampler moved after top-k, plus a Python
+validate-and-retry net) hard-aborts the process. When no post-truncation
+candidate is grammar-valid, llama.cpp's dist sampler picks an arbitrary
+token from the all-masked array and the grammar sampler's *accept* step
+throws C++ `std::runtime_error` ("Unexpected empty grammar stack after
+accepting piece"), which unwinds to `std::terminate` → SIGABRT. No Python
+net can catch a C-level abort. Reproduced: the unseeded 30-query battery
+aborts at query #27 (~1/30 per pass); the seed-42 battery passes all 30 —
+seeded probes gave false confidence. The grammar fix is therefore
+**approach B: sample-then-validate** (llama.cpp's own `grammar_first=false`
+strategy), specified in §4.
+
 ## 2. Decisions Made
 
 | Decision | Choice | Rationale |
@@ -42,9 +58,9 @@ grammar arm whose per-token cost matches lean.
 | Governor gating | Record `cpu_governor`, never gate on it | This machine reads `powersave` (intel_pstate) even in its healthy state |
 | Mid-run transitions | Record + report in a table footer; do not abort | Aborting wastes 200+ transactions; the footer makes contamination self-announcing |
 | Snapshot storage | One `machine_state TEXT` JSON column on `transactions` | Fields vary by hardware; JSON avoids schema churn; `ALTER TABLE` migration keeps old DBs readable |
-| Grammar fix | **A: post-top-k reorder + safety net** — `Llama` subclass reorders the sampler chain; sequence-level validate-and-retry covers the truncation edge case | Mechanism proven at ~0 overhead this session; ~40–60 lines. Rejected: hand-rolled ctypes decode loop (B, ~150 fragile lines reimplementing measurement semantics) and pure sequence-level retry (C, stops measuring constrained decoding) |
-| Old behavior | `Engine.generate(grammar_first=True)` + `lce bench --grammar-first` keep the grammar-first chain runnable | The before/after deliverable needs both orders through identical code paths on the same day |
-| Fallback accounting | `GenerationResult.used_fallback`; telemetry column `grammar_fallback INTEGER NOT NULL DEFAULT 0`; on fallback `total_ms` spans both attempts, `ttft_ms` is the first attempt's, `completion_tokens` counts the final attempt | Honest end-to-end cost; flagged rows are identifiable and expected ≈ never (0 invalid outputs in 90 seeded grammar transactions) |
+| Grammar fix | **B: sample-then-validate decode loop** (amended) — sample with the normal grammarless chain; check only the sampled token against a standalone grammar sampler; on rejection, mask the FULL vocab with the grammar and resample; accept the final token on the grammar | A (post-top-k reorder) was falsified at Task-4 verification: the all-candidates-invalid edge hard-aborts in C (uncatchable SIGABRT, ~1/30 unseeded battery passes). B never empties the candidate set (full-vocab grammar-first masking always leaves the structurally required tokens), keeps the per-token structural guarantee, and costs ~0 in the common case. C (pure retry) still rejected: stops measuring constrained decoding |
+| Old behavior | `Engine.generate(grammar_first=True)` + `lce bench --grammar-first` route grammar through `create_completion(grammar=...)`, i.e. the upstream grammar-first chain | The before/after deliverable needs both strategies through identical code paths on the same day |
+| Rescue accounting | `GenerationResult.used_fallback` = at least one token needed the full-vocab grammar rescue; telemetry column `grammar_fallback INTEGER NOT NULL DEFAULT 0` stores it | Makes the rare expensive path observable in the data; expected ≈ 0 (the model produced valid JSON unconstrained in 90/90 seeded transactions) |
 | Timing in tests | No latency asserts anywhere | This session measured 3× swings from machine state alone; latency claims live in findings tables |
 
 ## 3. Changes by File
@@ -52,10 +68,10 @@ grammar arm whose per-token cost matches lean.
 | File | Change |
 |---|---|
 | `lce/machine_state.py` (new) | `snapshot(sysfs_root="/sys", nvidia_smi="nvidia-smi") -> dict`; never raises |
-| `lce/sampling.py` (new) | `PostTopKGrammarLlama(Llama)` overriding `_init_sampler`; mirrors the 0.3.28 chain with grammar after min_p |
+| `lce/sampling.py` (new) | `SampleThenValidate` sampler: grammarless main chain + standalone grammar sampler; singleton validity check; full-vocab rescue; EOG handling |
 | `lce/telemetry.py` | `machine_state` + `grammar_fallback` columns; `ALTER TABLE` migration for pre-phase-4 DBs; `record(...)` accepts both |
-| `lce/engine.py` | Constructs `PostTopKGrammarLlama`; `generate(..., validate=None, grammar_first=False)`; fallback regeneration; `GenerationResult.used_fallback` |
-| `lce/bench.py` | Startup battery gate (`allow_battery` param); per-transaction snapshot → `db.record`; passes `validate_routing_output` to the engine; `grammar_first` param; table footer (battery-transaction count, min/max GPU SM clocks) |
+| `lce/engine.py` | `generate(..., grammar_first=False)`; grammar + not grammar_first → low-level decode loop driving `SampleThenValidate`; grammar_first → `create_completion(grammar=...)` (upstream chain); `GenerationResult.used_fallback` |
+| `lce/bench.py` | Startup battery gate (`allow_battery` param); per-transaction snapshot → `db.record`; `grammar_first` param; `grammar_fallback` from `result.used_fallback`; table footer (battery-transaction count, min/max GPU SM clocks) |
 | `lce/cli.py` | `lce bench --allow-battery --grammar-first` |
 | `tests/` | machine_state, migration, gate, fallback, sampler-equivalence, CLI plumbing (see §5) |
 | `docs/findings.md` | §8 one-line correction; new §9 with root cause + controlled before/after (final task) |
@@ -97,33 +113,55 @@ the run, each transaction stores its own snapshot; the printed table gains a
 footer: `battery transactions: N/270; gpu sm clocks: min–max MHz` (omitted
 when no snapshot captured GPU data).
 
-**`PostTopKGrammarLlama`.** `_init_sampler(*args, grammar=None, **kwargs)`:
-with `grammar=None` defer to `super()` unchanged; with a grammar, build
-`penalties → top_k → typical → top_p → min_p → grammar → temp → dist` —
-the upstream 0.3.28 chain (`llama.py:735-779`) with the grammar moved after
-min_p. A comment names the mirrored upstream lines; `uv.lock` pins 0.3.28,
-and any version bump must re-diff the override. Mirostat/temp≤0 branches are
-out of scope: the engine never sets them, and the override asserts the
-defaults it mirrors.
+**`SampleThenValidate`** (amended; mirrors llama.cpp `common/sampling.cpp`
+with `grammar_first=false`). Construction: a *main chain*
+(`internals.LlamaSampler`: penalties → top_k(40) → typical(1.0) →
+top_p(0.95) → min_p(0.05) → temp(0.80) → dist(seed)) mirroring the
+create_completion defaults of the pinned 0.3.28 — **no grammar in it** —
+plus a *standalone grammar sampler* (`LlamaSampler` with only
+`add_grammar`). Per token:
 
-**Engine fallback.** `generate(prompt, grammar_path=..., validate=..., grammar_first=False)`:
-1. Generate with the post-top-k chain (or grammar-first when requested).
-2. If a grammar and a validator are both present and `validate(text)` is
-   False: regenerate once with the grammar-first chain (structurally
-   guaranteed), `used_fallback=True`.
-3. Timing on fallback: `total_ms` from the original start through the retry;
-   `ttft_ms` from the first attempt; `completion_tokens` from the final
-   attempt. At most one retry per call.
+1. `tok = chain.sample(ctx, -1)` — identical cost and RNG stream to the
+   lean arm (this is what makes seeded grammar output equal seeded lean
+   output when no rescue fires).
+2. Singleton validity check: apply the grammar sampler to a one-element
+   `llama_token_data_array` holding `tok`; rejected ⇔ its logit becomes
+   `-inf`. Cost: one token-text walk, microseconds.
+3. On rejection (*rescue*): rebuild the full-vocab candidate array from
+   `ctx.get_logits_ith(-1)` (numpy view over the ctypes buffer), apply the
+   grammar sampler (full-vocab mask — never empties: grammar-first masking
+   always leaves the structurally required tokens), then apply the main
+   chain to the masked array and read `selected`. This pays the old
+   ~30 ms mask only at positions that need rescuing; `rescued` is latched.
+4. `grammar.accept(tok)` advances the parse stack. EOG tokens
+   (`llama_vocab_is_eog`) end generation and are never fed to the grammar
+   (llama.cpp's grammar sampler validates EOG against stack-emptiness in
+   the apply step, so an early EOS is rejected and rescued away).
 
-The truncation edge case this net covers: when none of the ~40 post-top-k
-candidates is grammar-valid, chain output is undefined (garbage token or NaN
-sampling). **Known limitation:** if llama.cpp ever hard-aborts in C on that
-edge instead, no Python net catches it; never observed, and `--grammar-first`
-remains the workaround.
+The chain's internal accept on a subsequently-rescued token is harmless:
+with the default penalties parameters (repeat 1.0, freq/present 0.0) the
+penalties sampler is a no-op, the same simplification llama.cpp's common
+sampler makes. Mirostat/temp≤0 variants are out of scope (the engine never
+uses them).
 
-**Bench/CLI.** `lce bench` passes `validate_routing_output` as the grammar
-arm's validator and threads `--allow-battery` / `--grammar-first`. `lce ask`
-is untouched.
+**Engine.** `generate(prompt, grammar_path=..., max_tokens=..., seed=...,
+grammar_first=False)`. Routing: no grammar, or `grammar_first=True` →
+the existing `create_completion` streaming path (with the grammar passed
+through when present — the upstream grammar-first chain, kept for the
+before/after deliverable). Grammar present and `grammar_first=False` →
+the low-level decode loop: `reset()`, `eval(prompt_tokens)` (reusing the
+already-tokenized prompt), then sample/eval one token at a time via
+`SampleThenValidate`, accumulating detokenized bytes (decoded once at the
+end, `errors="replace"`). Measurement semantics unchanged: `ttft_ms` at the
+first sampled token, `completion_tokens` excludes the EOG token,
+`total_ms` to loop end, context reset defeats prefix reuse.
+`GenerationResult.used_fallback` = the sampler's `rescued` flag. The
+former `validate=` parameter is gone — B's output is structurally
+guaranteed per token, so there is nothing to validate-and-retry.
+
+**Bench/CLI.** `lce bench` threads `--allow-battery` / `--grammar-first`
+and stores `result.used_fallback` in the `grammar_fallback` column. `lce
+ask` is untouched.
 
 ## 5. Testing
 
@@ -139,20 +177,25 @@ Unit (no GPU):
   `BenchOnBatteryError` raised before engine construction;
   `allow_battery=True` proceeds; `ac_online=None` proceeds. CLI level:
   the error maps to exit 2 with a message naming `--allow-battery`.
-- Fallback: fake engine whose first generation fails `validate`, second
-  (grammar-first) passes — assert one retry, `used_fallback=True`, timing
-  semantics (total spans both, ttft from first, ctok from final), and the
-  `grammar_fallback` telemetry value.
-- Sampler: `PostTopKGrammarLlama._init_sampler(grammar=None)` defers to the
-  parent (identity of behavior asserted via a spy); chain-order test via a
-  recording stub of `internals.LlamaSampler` asserting the documented add_*
-  sequence.
+- Sampler: main-chain construction order via a recording stub of
+  `internals.LlamaSampler` (penalties → top_k → typical → top_p → min_p →
+  temp → dist; grammar NOT in the chain; grammar sampler built separately);
+  `sample_token` branch logic with the validity check and rescue stubbed
+  (valid → no rescue; invalid → rescue called once, `rescued` latched).
+- Engine loop: fake sampler + fake llm — token streaming into text, EOG
+  stops the loop and is excluded from `completion_tokens`, ttft set at
+  first token, `used_fallback` mirrors the sampler's `rescued`,
+  `grammar_first=True` routes through create_completion with the grammar.
 - CLI: flag plumbing for `--allow-battery` and `--grammar-first`.
 
 GPU (`-m gpu`):
-- Three-arm e2e extended: seeded post-top-k grammar output equals the seeded
-  no-grammar output for the same prompt (the measured equivalence) and
-  passes `validate_routing_output`; `used_fallback` is False.
+- Three-arm e2e extended: seeded sample-then-validate grammar output equals
+  the seeded no-grammar output for the same prompt (same chain, same RNG
+  stream when no rescue fires) and passes `validate_routing_output`;
+  `used_fallback` is False.
+- **Abort regression:** the full 30-query battery through the grammar arm
+  unseeded (the exact workload that exposed approach A's SIGABRT at query
+  #27) completes without crashing and every output validates.
 - `benchmark_suite` asserts the footer fields and the `grammar_fallback`
   aggregate. **Process rule from the phase-3 retrospective: every task that
   touches these interfaces runs `uv run pytest -m gpu` explicitly** — the
@@ -181,15 +224,17 @@ No timing assertions anywhere (see §2).
 
 `snapshot()` never raises; per-field `None` degradation. Battery gate:
 `BenchOnBatteryError` from the library, exit 2 at the CLI (consistent with
-existing argument errors). Engine fallback retries at
-most once and only when both grammar and validator are present. `nvidia-smi`
-subprocess: 2 s timeout, output parsed defensively. Telemetry migration is
-idempotent (column-presence check before `ALTER TABLE`).
+existing argument errors). The grammar rescue path masks the full vocab, so
+the candidate set can never be empty and the approach-A abort is
+structurally unreachable; the rescue is per-token and bounded only by
+`max_tokens`. `nvidia-smi` subprocess: 2 s timeout, output parsed
+defensively. Telemetry migration is idempotent (column-presence check
+before `ALTER TABLE`).
 
 ## 8. Out of Scope
 
 The compression→savings gap (k tuning, payload trimming, scaffolding diet);
-`markdown_meta.py` dead-code cleanup; hand-rolled decode loop (approach B);
-lazy-grammar APIs; mirostat/greedy chain variants in the override; gating on
-CPU governor or thermal state; `lce ask` gating; CI; upstreaming the sampler
-reorder to llama-cpp-python.
+`markdown_meta.py` dead-code cleanup; post-top-k grammar masking (approach
+A — falsified, see §1); lazy-grammar APIs; mirostat/greedy/temp≤0 chain
+variants; gating on CPU governor or thermal state; `lce ask` gating; CI;
+upstreaming anything to llama-cpp-python.
