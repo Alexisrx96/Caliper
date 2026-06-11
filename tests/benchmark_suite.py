@@ -15,7 +15,13 @@ def test_benchmark_suite(tmp_path):
         db_path=tmp_path / "logs.db",
         persist_dir=tmp_path / "chroma",
         reps=1,
+        allow_battery=True,  # the suite verifies plumbing, not latency
     )
-    assert set(aggregates) == set(ARMS) | {"corpus_compression"}
+    assert set(aggregates) == set(ARMS) | {"corpus_compression", "machine"}
+    machine = aggregates["machine"]
+    assert machine["transactions"] == len(QUERY_BATTERY) * len(ARMS)
     for arm in ARMS:
         assert aggregates[arm]["n"] == len(QUERY_BATTERY)
+        assert "grammar_fallback_count" in aggregates[arm]
+    assert aggregates["naive"]["grammar_fallback_count"] == 0
+    assert aggregates["lean"]["grammar_fallback_count"] == 0

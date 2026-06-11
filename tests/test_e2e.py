@@ -28,6 +28,7 @@ def test_three_arms_end_to_end(tmp_path):
     db = TelemetryDB(tmp_path / "logs.db")
     query = "Where is the telemetry transaction schema defined?"
     prompt_tokens: dict[str, int] = {}
+    texts: dict[str, str] = {}
     for arm, grammar in ARMS:
         retrieval_mode = "naive" if arm == "naive" else "lean"
         docs = retriever.query(query, mode=retrieval_mode, k=3)
@@ -40,15 +41,25 @@ def test_three_arms_end_to_end(tmp_path):
         with db.record(
             run_id="e2e", mode=arm, model=MODEL.name, query=query
         ) as rec:
-            result = engine.generate(prompt, grammar_path=grammar, max_tokens=128)
+            result = engine.generate(
+                prompt,
+                grammar_path=grammar,
+                max_tokens=128,
+                seed=42,
+            )
             rec.set_result(
                 prompt_tokens=result.prompt_tokens,
                 completion_tokens=result.completion_tokens,
                 ttft_ms=result.ttft_ms,
                 response=result.text,
                 format_success=validate_routing_output(result.text),
+                grammar_fallback=result.used_fallback,
             )
         prompt_tokens[arm] = result.prompt_tokens
+        texts[arm] = result.text
+        assert result.used_fallback is False, (
+            f"{arm}: sample-then-validate must not need a rescue here"
+        )
     rows = sqlite3.connect(tmp_path / "logs.db").execute(
         "SELECT mode, format_success FROM transactions ORDER BY id"
     ).fetchall()
@@ -57,3 +68,25 @@ def test_three_arms_end_to_end(tmp_path):
     assert prompt_tokens["lean"] < prompt_tokens["naive"], (
         f"lean must use fewer prompt tokens: {prompt_tokens}"
     )
+    assert texts["lean_grammar"] == texts["lean"], (
+        "same prompt + same seed: sample-then-validate shares the lean "
+        "chain's RNG stream, so an already-valid sample must be unchanged; "
+        f"lean={texts['lean']!r} grammar={texts['lean_grammar']!r}"
+    )
+
+
+@pytest.mark.gpu
+def test_unseeded_grammar_battery_never_aborts(tmp_path):
+    from lce.bench import GRAMMAR_PATH, QUERY_BATTERY
+
+    retriever = Retriever(tmp_path / "chroma")
+    index_tree(retriever, ".")
+    engine = Engine(MODEL)
+    for query in QUERY_BATTERY:
+        docs = retriever.query(query, mode="lean", k=3)
+        prompt = build_prompt(query, docs, "lean")
+        result = engine.generate(prompt, grammar_path=GRAMMAR, max_tokens=128)
+        assert validate_routing_output(result.text), (
+            f"grammar arm must stay structurally valid; query={query!r} "
+            f"text={result.text!r} rescued={result.used_fallback}"
+        )
