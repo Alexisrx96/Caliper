@@ -5,6 +5,7 @@ kills an inference run).
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 import sys
 import time
@@ -29,6 +30,15 @@ CREATE TABLE IF NOT EXISTS transactions (
 );
 """
 
+# Columns added after phase 3; existing DBs gain them on open (idempotent).
+_MIGRATIONS = {
+    "machine_state": "ALTER TABLE transactions ADD COLUMN machine_state TEXT",
+    "grammar_fallback": (
+        "ALTER TABLE transactions"
+        " ADD COLUMN grammar_fallback INTEGER NOT NULL DEFAULT 0"
+    ),
+}
+
 
 class TransactionRecord:
     """Mutable holder filled in by the caller inside a `record()` block."""
@@ -39,6 +49,7 @@ class TransactionRecord:
         self.ttft_ms: float | None = None
         self.response: str | None = None
         self.format_success: bool | None = None
+        self.grammar_fallback: bool = False
 
     def set_result(
         self,
@@ -48,12 +59,14 @@ class TransactionRecord:
         ttft_ms: float,
         response: str,
         format_success: bool,
+        grammar_fallback: bool = False,
     ) -> None:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
         self.ttft_ms = ttft_ms
         self.response = response
         self.format_success = format_success
+        self.grammar_fallback = grammar_fallback
 
 
 class TelemetryDB:
@@ -64,11 +77,26 @@ class TelemetryDB:
             with conn:
                 conn.execute("PRAGMA journal_mode=WAL")
                 conn.executescript(_SCHEMA)
+                existing = {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(transactions)")
+                }
+                for column, ddl in _MIGRATIONS.items():
+                    if column not in existing:
+                        conn.execute(ddl)
         finally:
             conn.close()
 
     @contextmanager
-    def record(self, *, run_id: str, mode: str, model: str, query: str):
+    def record(
+        self,
+        *,
+        run_id: str,
+        mode: str,
+        model: str,
+        query: str,
+        machine_state: dict | None = None,
+    ):
         rec = TransactionRecord()
         ts = datetime.now(timezone.utc).isoformat()
         start = time.perf_counter()
@@ -84,8 +112,9 @@ class TelemetryDB:
                             "INSERT INTO transactions (run_id, ts, mode,"
                             " model, query, prompt_tokens,"
                             " completion_tokens, ttft_ms, total_latency_ms,"
-                            " format_success, response)"
-                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            " format_success, response, machine_state,"
+                            " grammar_fallback)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 run_id,
                                 ts,
@@ -100,6 +129,10 @@ class TelemetryDB:
                                 if rec.format_success is None
                                 else int(rec.format_success),
                                 rec.response,
+                                None
+                                if machine_state is None
+                                else json.dumps(machine_state),
+                                int(rec.grammar_fallback),
                             ),
                         )
                 finally:
