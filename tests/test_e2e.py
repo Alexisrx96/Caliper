@@ -31,6 +31,11 @@ def test_three_arms_end_to_end(tmp_path):
     for arm, grammar in ARMS:
         retrieval_mode = "naive" if arm == "naive" else "lean"
         docs = retriever.query(query, mode=retrieval_mode, k=3)
+        if arm == "lean":
+            assert any("telemetry" in d.doc_id for d in docs), (
+                "outline-only skeletons must still retrieve the telemetry "
+                f"module for this query; got {[d.doc_id for d in docs]}"
+            )
         prompt = build_prompt(query, docs, retrieval_mode)
         with db.record(
             run_id="e2e", mode=arm, model=MODEL.name, query=query
