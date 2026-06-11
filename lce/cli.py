@@ -28,6 +28,10 @@ def index(
     ),
 ) -> None:
     """Index a code/notes tree into raw + skeleton ChromaDB collections."""
+    if not path.is_dir():
+        typer.echo(f"error: {path} is not a directory", err=True)
+        raise typer.Exit(code=2)
+
     from lce.indexer import index_tree
     from lce.retriever import Retriever
 
@@ -48,6 +52,9 @@ def ask(
     model: Path = typer.Option(_DEFAULT_MODEL, help="GGUF model path"),
     persist_dir: Path = typer.Option(Path(".chroma")),
     db: Path = typer.Option(Path("experiment_logs.db")),
+    seed: Optional[int] = typer.Option(
+        None, help="sampling seed for a reproducible answer"
+    ),
 ) -> None:
     """Answer a routing query; telemetry mode = naive | lean | lean_grammar."""
     if mode not in ("naive", "lean"):
@@ -86,7 +93,9 @@ def ask(
     with telemetry.record(
         run_id="ask", mode=telemetry_mode, model=model.name, query=query
     ) as rec:
-        result = engine.generate(prompt, grammar_path=grammar_path, max_tokens=128)
+        result = engine.generate(
+            prompt, grammar_path=grammar_path, max_tokens=128, seed=seed
+        )
         ok = validate_routing_output(result.text)
         rec.set_result(
             prompt_tokens=result.prompt_tokens,
@@ -112,6 +121,9 @@ def bench(
     model: Path = typer.Option(_DEFAULT_MODEL, help="GGUF model path"),
     persist_dir: Path = typer.Option(Path(".chroma")),
     db: Path = typer.Option(Path("experiment_logs.db")),
+    seed: Optional[int] = typer.Option(
+        None, help="base seed; rep i of each (query, arm) uses seed+i"
+    ),
 ) -> None:
     """Run the fixed query battery through all three arms."""
     from lce.bench import run_benchmark
@@ -125,6 +137,7 @@ def bench(
             persist_dir=persist_dir,
             reps=reps,
             reindex=reindex,
+            seed=seed,
         )
     except EngineLoadError as exc:
         typer.echo(f"error: {exc}", err=True)
