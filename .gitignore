@@ -9,3 +9,4 @@ models/
 .chroma/
 .pytest_cache/
 dist/
+.claude/worktrees/
