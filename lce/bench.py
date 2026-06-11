@@ -55,6 +55,7 @@ def run_benchmark(
     reps: int = 3,
     k: int = 3,
     reindex: bool = False,
+    seed: int | None = None,
     engine=None,
 ) -> dict:
     """Run QUERY_BATTERY x ARMS x reps under one run_id.
@@ -68,8 +69,9 @@ def run_benchmark(
     (query, arm), so prompt_savings_pct has an effective sample size of
     len(QUERY_BATTERY) per arm — reps only add samples to the generation-side
     metrics (ttft, latency, format_success), which are non-deterministic
-    (no seed pinning). The Engine resets the llama context before every
-    generation, defeating llama.cpp's prefix-match KV reuse — without that
+    (sampled unless seed is set; with seed, rep i uses seed + i so the run
+    reproduces exactly while reps differ). The Engine resets the llama context
+    before every generation, defeating llama.cpp's prefix-match KV reuse — without that
     reset, identical prompts measured ~10x faster TTFT on back-to-back calls,
     biasing arm and rep comparisons by run order.
     """
@@ -91,12 +93,13 @@ def run_benchmark(
             docs = retriever.query(query, mode=retrieval_mode, k=k)
             prompt = build_prompt(query, docs, retrieval_mode)
             grammar = GRAMMAR_PATH if arm == "lean_grammar" else None
-            for _ in range(reps):
+            for rep in range(reps):
+                rep_seed = None if seed is None else seed + rep
                 with db.record(
                     run_id=run_id, mode=arm, model=model_name, query=query
                 ) as rec:
                     result = engine.generate(
-                        prompt, grammar_path=grammar, max_tokens=128
+                        prompt, grammar_path=grammar, max_tokens=128, seed=rep_seed
                     )
                     rec.set_result(
                         prompt_tokens=result.prompt_tokens,

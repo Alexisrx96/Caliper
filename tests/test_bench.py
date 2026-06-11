@@ -18,8 +18,8 @@ class FakeEngine:
     def __init__(self):
         self.calls = []
 
-    def generate(self, prompt, *, grammar_path=None, max_tokens=128):
-        self.calls.append((prompt, grammar_path))
+    def generate(self, prompt, *, grammar_path=None, max_tokens=128, seed=None):
+        self.calls.append((prompt, grammar_path, seed))
         return GenerationResult(
             text=VALID,
             prompt_tokens=len(prompt) // 4,
@@ -64,6 +64,38 @@ def test_grammar_only_in_lean_grammar_arm(tmp_path):
     with_grammar = [c for c in engine.calls if c[1] is not None]
     assert len(with_grammar) == len(QUERY_BATTERY)
     assert len(engine.calls) == len(QUERY_BATTERY) * len(ARMS)
+
+
+def test_seed_offsets_by_rep(tmp_path):
+    engine = FakeEngine()
+    run_benchmark(
+        "r3",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=3,
+        engine=engine,
+        seed=100,
+    )
+    seeds = [c[2] for c in engine.calls]
+    assert len(seeds) == len(QUERY_BATTERY) * len(ARMS) * 3
+    # generate calls are grouped (query, arm, rep): every consecutive
+    # triple must be (base, base+1, base+2)
+    for i in range(0, len(seeds), 3):
+        assert seeds[i : i + 3] == [100, 101, 102]
+
+
+def test_no_seed_passes_none(tmp_path):
+    engine = FakeEngine()
+    run_benchmark(
+        "r4",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=2,
+        engine=engine,
+    )
+    assert all(c[2] is None for c in engine.calls)
 
 
 def test_corpus_compression_per_kind(tmp_path):
