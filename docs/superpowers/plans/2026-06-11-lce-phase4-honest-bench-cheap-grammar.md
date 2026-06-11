@@ -4,9 +4,15 @@
 
 **Goal:** Benchmark runs that record (and gate on) machine power state, plus a grammar-constrained arm whose per-token cost matches the unconstrained arm.
 
-**Architecture:** A new `lce/machine_state.py` snapshots AC/CPU/GPU state per transaction into a JSON telemetry column; `lce bench` refuses to start on battery. A new `lce/sampling.py` subclasses `llama_cpp.Llama` to move the GBNF mask after top-k (≤40 candidates instead of ~152k, measured ~0 overhead), with a validate-and-retry-grammar-first safety net in `Engine.generate`. The phase ends with a controlled on-AC before/after run and a findings.md correction.
+**Architecture:** A new `lce/machine_state.py` snapshots AC/CPU/GPU state per transaction into a JSON telemetry column; `lce bench` refuses to start on battery. A new `lce/sampling.py` implements sample-then-validate constrained decoding (llama.cpp's `grammar_first=false` strategy): the grammarless chain samples, only the sampled token is grammar-checked, and rejections are rescued with a full-vocab grammar mask — per-token structural guarantee at ~lean cost. The phase ends with a controlled on-AC before/after run and a findings.md correction.
 
 **Tech Stack:** Python 3.11+, llama-cpp-python 0.3.28 (pinned in `uv.lock`), SQLite, typer, pytest. Spec: `docs/superpowers/specs/2026-06-11-lce-phase4-honest-bench-cheap-grammar-design.md`.
+
+> **Amended 2026-06-11 (commit history has the original):** Tasks 3, 4, 5
+> and 7 rewritten for the approach-B pivot (sample-then-validate decode
+> loop) after the original post-top-k approach hard-aborted in C during
+> Task-4 verification (spec §1). Tasks 1–2 were executed under the original
+> text and are unaffected.
 
 **Conventions that bind every task:**
 - Run commands through `uv run` (e.g. `uv run pytest`). Default pytest excludes GPU tests (`addopts = "-m 'not gpu'"`).
@@ -480,41 +486,51 @@ git commit -m "feat: telemetry machine_state + grammar_fallback columns with mig
 
 ---
 
-### Task 3: Post-top-k grammar sampler chain
+### Task 3 (amended): Sample-then-validate grammar sampler
 
 **Files:**
-- Create: `lce/sampling.py`
-- Create: `tests/test_sampling.py`
+- Replace: `lce/sampling.py` (the committed post-top-k version is falsified)
+- Replace: `tests/test_sampling.py`
 
-Background (spec §1/§4): upstream llama-cpp-python 0.3.28 builds the sampler
-chain in `Llama._init_sampler` (`llama.py:735-779`) with the grammar added
-*before* top-k, so every token pays a GBNF mask over the full ~152k vocab
-(~+30 ms/token measured). Moving the grammar after min_p masks ≤40 candidates
-(~0 overhead, measured). `generate()` calls `_init_sampler` with all-keyword
-arguments, which is what makes the override safe.
+Background (spec §1/§4): upstream applies the grammar to the full ~152k
+vocab per token (~+30 ms/tok). The post-top-k reorder hard-aborts when no
+truncated candidate is valid. Approach B samples with a grammarless chain
+(identical cost and RNG stream to lean), checks only the sampled token
+against a standalone grammar sampler (microseconds), and on rejection masks
+the FULL vocab — which can never be empty — before resampling. The grammar
+accepts the final token to advance its parse stack; EOG tokens are never
+fed to accept.
 
 - [ ] **Step 1: Write the failing tests**
 
-Create `tests/test_sampling.py`:
+Replace `tests/test_sampling.py`:
 
 ```python
-"""PostTopKGrammarLlama chain order tests — no model load, no GPU.
+"""SampleThenValidate logic tests — no model load, no GPU.
 
-Instances are built with __new__ plus the three attributes _init_sampler
-reads (last_n_tokens_size, _seed, _model); the real Llama.__init__ would
-load a GGUF file.
+The chain/grammar samplers are replaced by recorders; the ctypes-touching
+methods (_grammar_allows, _rescue, is_eog) are stubbed per test. Real
+sampling behavior is covered by the GPU suite (Task 7).
 """
-import pytest
+from types import SimpleNamespace
 
 import lce.sampling as sampling
-from lce.sampling import PostTopKGrammarLlama
+from lce.sampling import CHAIN_DEFAULTS, SampleThenValidate
 
 
 class RecordingSampler:
-    """Stands in for llama_cpp._internals.LlamaSampler; records add_* calls."""
+    """Stands in for llama_cpp._internals.LlamaSampler."""
 
     def __init__(self):
         self.added = []
+        self.accepted = []
+        self.sample_returns = None
+
+    def accept(self, tok):
+        self.accepted.append(tok)
+
+    def sample(self, ctx, idx=-1):
+        return self.sample_returns
 
     def __getattr__(self, name):
         if not name.startswith("add_"):
@@ -526,162 +542,196 @@ class RecordingSampler:
         return record
 
 
-def _bare(grammar_first=False):
-    llm = PostTopKGrammarLlama.__new__(PostTopKGrammarLlama)
-    llm.grammar_first = grammar_first
-    llm.last_n_tokens_size = 64
-    llm._seed = 42
-    llm._model = object()
-    return llm
-
-
-def test_grammar_chain_order_is_post_top_k(monkeypatch):
+def _sampler(monkeypatch, seed=42):
     monkeypatch.setattr(sampling.internals, "LlamaSampler", RecordingSampler)
-    sampler = _bare()._init_sampler(grammar=object())
-    assert sampler.added == [
-        "penalties", "top_k", "typical", "top_p", "min_p",
-        "grammar", "temp", "dist",
+    llm = SimpleNamespace(
+        last_n_tokens_size=64, _model=object(), _ctx=object(), _n_vocab=16
+    )
+    return SampleThenValidate(llm, grammar=object(), seed=seed)
+
+
+def test_main_chain_order_has_no_grammar(monkeypatch):
+    s = _sampler(monkeypatch)
+    assert s._chain.added == [
+        "penalties", "top_k", "typical", "top_p", "min_p", "temp", "dist",
     ]
+    assert s._grammar.added == ["grammar"]
 
 
-def test_no_grammar_defers_to_upstream(monkeypatch):
-    sentinel = object()
-    seen = {}
-
-    def spy(self, **kwargs):
-        seen.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr(sampling.Llama, "_init_sampler", spy)
-    assert _bare()._init_sampler(grammar=None, top_k=7) is sentinel
-    assert seen["grammar"] is None
-    assert seen["top_k"] == 7
+def test_chain_defaults_mirror_create_completion():
+    assert CHAIN_DEFAULTS == {
+        "repeat_penalty": 1.0, "frequency_penalty": 0.0,
+        "presence_penalty": 0.0, "top_k": 40, "typical_p": 1.0,
+        "top_p": 0.95, "min_p": 0.05, "temp": 0.80,
+    }
 
 
-def test_grammar_first_defers_to_upstream(monkeypatch):
-    sentinel = object()
-    grammar = object()
-    seen = {}
-
-    def spy(self, **kwargs):
-        seen.update(kwargs)
-        return sentinel
-
-    monkeypatch.setattr(sampling.Llama, "_init_sampler", spy)
-    assert _bare(grammar_first=True)._init_sampler(grammar=grammar) is sentinel
-    assert seen["grammar"] is grammar
+def test_valid_token_accepted_no_rescue(monkeypatch):
+    s = _sampler(monkeypatch)
+    s._chain.sample_returns = 7
+    monkeypatch.setattr(s, "is_eog", lambda tok: False)
+    monkeypatch.setattr(s, "_grammar_allows", lambda tok: True)
+    assert s.sample_token() == 7
+    assert s._grammar.accepted == [7]
+    assert s.rescued is False
 
 
-@pytest.mark.parametrize(
-    "kwargs",
-    [{"temp": 0.0}, {"temp": -1.0}, {"mirostat_mode": 1},
-     {"logits_processor": object()}],
-)
-def test_unmirrored_branches_raise(kwargs):
-    with pytest.raises(NotImplementedError, match="grammar_first"):
-        _bare()._init_sampler(grammar=object(), **kwargs)
+def test_invalid_token_triggers_rescue(monkeypatch):
+    s = _sampler(monkeypatch)
+    s._chain.sample_returns = 7
+    monkeypatch.setattr(s, "is_eog", lambda tok: False)
+    monkeypatch.setattr(s, "_grammar_allows", lambda tok: False)
+    monkeypatch.setattr(s, "_rescue", lambda: 9)
+    assert s.sample_token() == 9
+    assert s._grammar.accepted == [9]  # rescued token, not the rejected one
+    assert s.rescued is True
+
+
+def test_allowed_eog_returned_without_grammar_accept(monkeypatch):
+    s = _sampler(monkeypatch)
+    s._chain.sample_returns = 2
+    monkeypatch.setattr(s, "is_eog", lambda tok: tok == 2)
+    monkeypatch.setattr(s, "_grammar_allows", lambda tok: True)
+    assert s.sample_token() == 2
+    assert s._grammar.accepted == []
+
+
+def test_early_eog_is_rescued(monkeypatch):
+    s = _sampler(monkeypatch)
+    s._chain.sample_returns = 2
+    monkeypatch.setattr(s, "is_eog", lambda tok: tok == 2)
+    monkeypatch.setattr(s, "_grammar_allows", lambda tok: False)
+    monkeypatch.setattr(s, "_rescue", lambda: 9)
+    assert s.sample_token() == 9
+    assert s._grammar.accepted == [9]
+    assert s.rescued is True
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_sampling.py -v`
-Expected: FAIL — `ModuleNotFoundError: No module named 'lce.sampling'`
+Expected: FAIL — `ImportError: cannot import name 'SampleThenValidate'`
 
 - [ ] **Step 3: Write the implementation**
 
-Create `lce/sampling.py`:
+Replace `lce/sampling.py`:
 
 ```python
-"""Post-top-k grammar sampler chain (phase-4 spec §4).
+"""Sample-then-validate grammar sampling (phase-4 spec §4, approach B).
 
-Mirrors `llama_cpp.llama.Llama._init_sampler` of the pinned llama-cpp-python
-0.3.28 (llama.py:735-779) with exactly one change: the grammar sampler is
-added AFTER min_p — masking the <=top_k surviving candidates — instead of
-before top_k, where it masks the full ~152k-token vocab at ~+30 ms/token
-(measured; see docs/findings.md §9). Identical seeded output was measured
-for both orders on the routing task.
+Ports llama.cpp's common/sampling.cpp strategy (grammar_first=false): sample
+with the normal grammarless chain, check only the sampled token against the
+grammar, and on rejection apply the grammar mask to the FULL vocabulary
+before resampling. The full-vocab mask cannot empty the candidate set, so
+the post-top-k abort (std::runtime_error "Unexpected empty grammar stack")
+is structurally unreachable, and the common case costs one singleton
+grammar check (~µs) instead of a ~152k-token mask (~30 ms) per token.
 
-Any llama-cpp-python version bump must re-diff this override against the
-upstream method. Only the default sampling branch is mirrored (temp > 0, no
-mirostat, no logits_processor) — the engine never uses the others, and the
-override refuses them rather than silently mis-ordering.
+Chain parameters mirror create_completion's defaults in the pinned
+llama-cpp-python 0.3.28 so that, absent a rescue, the seeded RNG stream —
+and therefore the output — is identical to the grammarless path. A version
+bump must re-check these constants. The chain's internal accept of a
+subsequently-rescued token is harmless: with the default penalty parameters
+the penalties sampler is a no-op (same simplification llama.cpp makes).
 """
 from __future__ import annotations
 
+import ctypes
+
+import numpy as np
+
+import llama_cpp
 import llama_cpp._internals as internals
-from llama_cpp import Llama, LlamaGrammar
-from llama_cpp.llama import LogitsProcessorList
+
+# create_completion defaults in llama-cpp-python 0.3.28.
+CHAIN_DEFAULTS = {
+    "repeat_penalty": 1.0,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "top_k": 40,
+    "typical_p": 1.0,
+    "top_p": 0.95,
+    "min_p": 0.05,
+    "temp": 0.80,
+}
+
+_TOKEN_DATA_DTYPE = np.dtype(
+    [("id", np.int32), ("logit", np.float32), ("p", np.float32)]
+)
 
 
-class PostTopKGrammarLlama(Llama):
-    # Set per call by Engine.generate before create_completion; True restores
-    # the upstream grammar-first chain (the structurally safe slow path).
-    grammar_first: bool = False
+class SampleThenValidate:
+    """Per-generation grammar-constrained sampler (one per generate call)."""
 
-    def _init_sampler(
-        self,
-        top_k: int = 40,
-        top_p: float = 0.95,
-        min_p: float = 0.05,
-        typical_p: float = 1.0,
-        temp: float = 0.80,
-        repeat_penalty: float = 1.0,
-        frequency_penalty: float = 0.0,
-        presence_penalty: float = 0.0,
-        tfs_z: float = 1.0,
-        mirostat_mode: int = 0,
-        mirostat_eta: float = 0.1,
-        mirostat_tau: float = 5.0,
-        penalize_nl: bool = True,
-        logits_processor: LogitsProcessorList | None = None,
-        grammar: LlamaGrammar | None = None,
-    ):
-        if grammar is None or self.grammar_first:
-            return super()._init_sampler(
-                top_k=top_k,
-                top_p=top_p,
-                min_p=min_p,
-                typical_p=typical_p,
-                temp=temp,
-                repeat_penalty=repeat_penalty,
-                frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty,
-                tfs_z=tfs_z,
-                mirostat_mode=mirostat_mode,
-                mirostat_eta=mirostat_eta,
-                mirostat_tau=mirostat_tau,
-                penalize_nl=penalize_nl,
-                logits_processor=logits_processor,
-                grammar=grammar,
-            )
-        if temp <= 0.0 or mirostat_mode != 0 or logits_processor is not None:
-            raise NotImplementedError(
-                "PostTopKGrammarLlama mirrors only the default sampling branch"
-                " (temp > 0, no mirostat, no logits_processor); set"
-                " grammar_first=True for other configurations."
-            )
-        sampler = internals.LlamaSampler()
-        sampler.add_penalties(
-            penalty_last_n=self.last_n_tokens_size,
-            penalty_repeat=repeat_penalty,
-            penalty_freq=frequency_penalty,
-            penalty_present=presence_penalty,
-        )
+    def __init__(self, llm, grammar, seed: int | None) -> None:
+        self._llm = llm
+        self.rescued = False
         min_keep = 1  # upstream: max(1, n_probs) with n_probs = 0
-        sampler.add_top_k(top_k)
-        sampler.add_typical(typical_p, min_keep)
-        sampler.add_top_p(top_p, min_keep)
-        sampler.add_min_p(min_p, min_keep)
-        sampler.add_grammar(self._model, grammar)  # moved: post-truncation mask
-        sampler.add_temp(temp)
-        sampler.add_dist(self._seed)
-        return sampler
+        self._chain = internals.LlamaSampler()
+        self._chain.add_penalties(
+            penalty_last_n=llm.last_n_tokens_size,
+            penalty_repeat=CHAIN_DEFAULTS["repeat_penalty"],
+            penalty_freq=CHAIN_DEFAULTS["frequency_penalty"],
+            penalty_present=CHAIN_DEFAULTS["presence_penalty"],
+        )
+        self._chain.add_top_k(CHAIN_DEFAULTS["top_k"])
+        self._chain.add_typical(CHAIN_DEFAULTS["typical_p"], min_keep)
+        self._chain.add_top_p(CHAIN_DEFAULTS["top_p"], min_keep)
+        self._chain.add_min_p(CHAIN_DEFAULTS["min_p"], min_keep)
+        self._chain.add_temp(CHAIN_DEFAULTS["temp"])
+        self._chain.add_dist(
+            llama_cpp.LLAMA_DEFAULT_SEED if seed is None else seed
+        )
+        self._grammar = internals.LlamaSampler()
+        self._grammar.add_grammar(llm._model, grammar)
+
+    def sample_token(self) -> int:
+        """One grammar-valid token (or an EOG the grammar allows)."""
+        tok = self._chain.sample(self._llm._ctx, -1)
+        if self._grammar_allows(tok):
+            if not self.is_eog(tok):
+                self._grammar.accept(tok)
+            return tok
+        self.rescued = True
+        tok = self._rescue()
+        if not self.is_eog(tok):
+            self._grammar.accept(tok)
+        return tok
+
+    def is_eog(self, tok: int) -> bool:
+        return llama_cpp.llama_vocab_is_eog(self._llm._model.vocab, tok)
+
+    def _grammar_allows(self, tok: int) -> bool:
+        # Grammar apply masks invalid candidates to -inf; it validates EOG
+        # against stack-emptiness, and never mutates parse state.
+        data = (llama_cpp.llama_token_data * 1)(
+            llama_cpp.llama_token_data(tok, 0.0, 0.0)
+        )
+        arr = llama_cpp.llama_token_data_array(data, 1, -1, False)
+        llama_cpp.llama_sampler_apply(self._grammar.sampler, ctypes.byref(arr))
+        return data[0].logit != float("-inf")
+
+    def _rescue(self) -> int:
+        """Grammar-first resample over the FULL vocab (never empty)."""
+        n_vocab = self._llm._n_vocab
+        logits = np.ctypeslib.as_array(
+            self._llm._ctx.get_logits_ith(-1), shape=(n_vocab,)
+        )
+        buf = (llama_cpp.llama_token_data * n_vocab)()
+        view = np.frombuffer(buf, dtype=_TOKEN_DATA_DTYPE)
+        view["id"] = np.arange(n_vocab, dtype=np.int32)
+        view["logit"] = logits
+        view["p"] = 0.0
+        arr = llama_cpp.llama_token_data_array(buf, n_vocab, -1, False)
+        llama_cpp.llama_sampler_apply(self._grammar.sampler, ctypes.byref(arr))
+        llama_cpp.llama_sampler_apply(self._chain.sampler, ctypes.byref(arr))
+        return arr.data[arr.selected].id
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_sampling.py -v`
-Expected: 7 passed
+Expected: 6 passed
 
 - [ ] **Step 5: Run the full unit suite**
 
@@ -692,16 +742,23 @@ Expected: all pass
 
 ```bash
 git add lce/sampling.py tests/test_sampling.py
-git commit -m "feat: post-top-k grammar sampler chain (PostTopKGrammarLlama)"
+git commit -m "feat: sample-then-validate grammar sampler (approach B)"
 ```
 
 ---
 
-### Task 4: Engine — fallback net, grammar_first, used_fallback
+### Task 4 (amended): Engine — constrained decode loop + grammar_first
 
 **Files:**
 - Modify: `lce/engine.py`
 - Modify: `tests/test_engine.py` (append tests)
+
+Routing: no grammar, or `grammar_first=True` → the existing
+`create_completion` streaming path (grammar passed through when present =
+upstream grammar-first chain, kept for the before/after deliverable).
+Grammar present and `grammar_first=False` → low-level loop driving
+`SampleThenValidate`: reset, eval the already-tokenized prompt, then
+sample/eval one token at a time, accumulating detokenized bytes.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -714,97 +771,129 @@ VALID = '{"action": "none", "target": "", "confidence": 1.0}'
 GRAMMAR = Path("g.gbnf")
 
 
-class _ScriptedLlama:
-    """Each create_completion call streams the next scripted text, one chunk
-    per character, then the finish sentinel. Records grammar_first per call."""
+class _GrammarFirstLlama(_FakeLlama):
+    """create_completion path recorder: captures the grammar kwarg."""
 
-    grammar_first = False  # class default, as on PostTopKGrammarLlama
+    def __init__(self, texts):
+        super().__init__(texts)
+        self.seen_grammars = []
 
-    def __init__(self, scripts):
-        self._scripts = list(scripts)
-        self.calls = []  # (grammar, grammar_first, seed) per call
+    def create_completion(self, prompt, *, max_tokens, grammar, stream, seed=None):
+        self.seen_grammars.append(grammar)
+        yield from super().create_completion(
+            prompt, max_tokens=max_tokens, grammar=grammar, stream=stream,
+            seed=seed,
+        )
 
-    def reset(self):
-        pass
+
+class _FakeLoopLlama:
+    """Low-level surface used by the constrained decode loop."""
+
+    def __init__(self):
+        self.evals = []
+        self.reset_calls = 0
 
     def tokenize(self, data, special=True):
         return list(range(7))
 
-    def create_completion(self, prompt, *, max_tokens, grammar, stream, seed=None):
-        self.calls.append((grammar, self.grammar_first, seed))
-        for ch in self._scripts.pop(0):
-            yield {"choices": [{"text": ch, "finish_reason": None}]}
-        yield {"choices": [{"text": "", "finish_reason": "stop"}]}
+    def reset(self):
+        self.reset_calls += 1
+
+    def eval(self, tokens):
+        self.evals.append(list(tokens))
+
+    def detokenize(self, tokens):
+        return bytes(f"<{tokens[0]}>", "utf-8")
 
 
-def _engine(llm):
+class _FakeSampler:
+    """Scripted SampleThenValidate stand-in. Token 0 is EOG."""
+
+    def __init__(self, llm, grammar, seed, tokens=(5, 6, 0), rescued=False):
+        self.init_args = (llm, grammar, seed)
+        self._tokens = list(tokens)
+        self.rescued = rescued
+
+    def sample_token(self):
+        return self._tokens.pop(0)
+
+    def is_eog(self, tok):
+        return tok == 0
+
+
+def _loop_engine(monkeypatch, llm, tokens=(5, 6, 0), rescued=False):
+    import lce.sampling
+
+    def factory(inner_llm, grammar, seed):
+        return _FakeSampler(inner_llm, grammar, seed, tokens, rescued)
+
+    monkeypatch.setattr(lce.sampling, "SampleThenValidate", factory)
     engine = Engine.__new__(Engine)
     engine._llm = llm
-    # pre-seeded cache: no llama_cpp import, no grammar file on disk
     engine._grammar_cache = {GRAMMAR: object()}
     return engine
 
 
-def test_fallback_retries_grammar_first_once():
-    llm = _ScriptedLlama(["garbage!!", VALID])
-    result = _engine(llm).generate(
-        "hi", grammar_path=GRAMMAR, validate=validate_routing_output
+def test_constrained_loop_streams_until_eog(monkeypatch):
+    llm = _FakeLoopLlama()
+    result = _loop_engine(monkeypatch, llm).generate("hi", grammar_path=GRAMMAR)
+    assert result.text == "<5><6>"
+    assert result.completion_tokens == 2  # EOG excluded
+    assert result.prompt_tokens == 7
+    assert result.ttft_ms > 0 and result.total_ms >= result.ttft_ms
+    assert result.used_fallback is False
+    assert llm.reset_calls == 1
+    assert llm.evals[0] == list(range(7))  # prompt eval
+    assert llm.evals[1:] == [[5], [6]]    # one eval per accepted token
+
+
+def test_constrained_loop_reports_rescue(monkeypatch):
+    llm = _FakeLoopLlama()
+    result = _loop_engine(monkeypatch, llm, rescued=True).generate(
+        "hi", grammar_path=GRAMMAR
     )
     assert result.used_fallback is True
-    assert result.text == VALID
-    assert result.completion_tokens == len(VALID)  # final attempt's tokens
-    assert [c[1] for c in llm.calls] == [False, True]  # post-top-k, then slow
-    assert result.total_ms >= result.ttft_ms
 
 
-def test_no_fallback_when_output_validates():
-    llm = _ScriptedLlama([VALID])
-    result = _engine(llm).generate(
-        "hi", grammar_path=GRAMMAR, validate=validate_routing_output
+def test_constrained_loop_respects_max_tokens(monkeypatch):
+    llm = _FakeLoopLlama()
+    result = _loop_engine(monkeypatch, llm, tokens=(5, 6, 7, 8)).generate(
+        "hi", grammar_path=GRAMMAR, max_tokens=3
     )
+    assert result.completion_tokens == 3
+    assert result.text == "<5><6><7>"
+
+
+def test_grammar_first_routes_through_create_completion():
+    llm = _GrammarFirstLlama(["a", "b"])
+    engine = Engine.__new__(Engine)
+    engine._llm = llm
+    sentinel = object()
+    engine._grammar_cache = {GRAMMAR: sentinel}
+    result = engine.generate("hi", grammar_path=GRAMMAR, grammar_first=True)
+    assert result.text == "ab"
     assert result.used_fallback is False
-    assert len(llm.calls) == 1
+    assert llm.seen_grammars == [sentinel]
 
 
-def test_no_validator_means_no_retry():
-    llm = _ScriptedLlama(["garbage!!"])
-    result = _engine(llm).generate("hi", grammar_path=GRAMMAR)
-    assert result.used_fallback is False
-    assert result.text == "garbage!!"
-    assert len(llm.calls) == 1
-
-
-def test_validator_without_grammar_means_no_retry():
-    llm = _ScriptedLlama(["garbage!!"])
-    result = _engine(llm).generate("hi", validate=validate_routing_output)
-    assert result.used_fallback is False
-    assert len(llm.calls) == 1
-
-
-def test_grammar_first_flag_uses_slow_chain_directly():
-    llm = _ScriptedLlama([VALID])
-    result = _engine(llm).generate(
-        "hi", grammar_path=GRAMMAR, validate=validate_routing_output,
-        grammar_first=True,
-    )
-    assert result.used_fallback is False
-    assert [c[1] for c in llm.calls] == [True]
+def test_no_grammar_uses_streaming_path_with_none():
+    llm = _GrammarFirstLlama(["a"])
+    engine = Engine.__new__(Engine)
+    engine._llm = llm
+    engine._grammar_cache = {}
+    result = engine.generate("hi")
+    assert result.text == "a"
+    assert llm.seen_grammars == [None]
 ```
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `uv run pytest tests/test_engine.py -v`
-Expected: new tests FAIL — `generate() got an unexpected keyword argument 'validate'`; pre-existing tests pass
+Expected: new tests FAIL — `generate() got an unexpected keyword argument 'grammar_first'` / missing loop; pre-existing tests pass
 
 - [ ] **Step 3: Implement**
 
 In `lce/engine.py`:
-
-Add to imports:
-
-```python
-from collections.abc import Callable
-```
 
 Add the field to `GenerationResult` (defaulted — existing constructors keep working):
 
@@ -819,22 +908,8 @@ class GenerationResult:
     used_fallback: bool = False
 ```
 
-In `Engine.__init__`, replace the `Llama` import and construction:
-
-```python
-        from lce.sampling import PostTopKGrammarLlama  # deferred: slow import, needs native lib
-
-        try:
-            self._llm = PostTopKGrammarLlama(
-                model_path=str(model_path),
-                n_ctx=n_ctx,
-                n_gpu_layers=n_gpu_layers,
-                verbose=False,
-            )
-```
-
-Replace `generate` with the two-attempt structure (docstring keeps the
-existing measurement-semantics text and adds the new parameters):
+`Engine.__init__` keeps constructing plain `Llama` (the approach-A subclass
+is gone). Replace `generate` with the routed structure:
 
 ```python
     def generate(
@@ -844,32 +919,29 @@ existing measurement-semantics text and adds the new parameters):
         grammar_path: str | Path | None = None,
         max_tokens: int = 256,
         seed: int | None = None,
-        validate: Callable[[str], bool] | None = None,
         grammar_first: bool = False,
     ) -> GenerationResult:
-        """Stream a completion and measure it.
+        """Generate a completion and measure it.
 
         Measurement semantics (foundation spec §5, phase-4 spec §4):
         - prompt_tokens: llama.cpp tokenization (special=True) of `prompt`,
           identical to what create_completion evaluates.
-        - completion_tokens: count of streamed content chunks of the FINAL
-          attempt; the trailing finish_reason sentinel chunk is excluded.
-        - ttft_ms: time from generation start to the first content chunk of
-          the FIRST attempt. Grammar compilation is cached per path and
-          excluded by design.
-        - total_ms: time from generation start to stream end, spanning the
-          fallback retry when one happens. Falls back as ttft_ms when zero
-          tokens are generated (immediate EOS).
-        - seed: forwarded to create_completion for reproducible sampling.
-        - validate + grammar: the post-top-k chain (lce/sampling.py) leaves
-          one edge case — no grammar-valid token among the <=top_k surviving
-          candidates yields undefined output. When the finished text fails
-          `validate`, generate retries ONCE with the grammar-first chain
-          (structurally guaranteed) and sets used_fallback=True.
-        - grammar_first=True: skip the post-top-k chain entirely (the
-          pre-phase-4 behavior; used for before/after benchmarking).
+        - completion_tokens: generated tokens; the EOG token and the
+          create_completion finish-reason sentinel are excluded.
+        - ttft_ms: time from generation start to the first token.
+          Grammar compilation is cached per path and excluded by design.
+        - total_ms: time from generation start to generation end. Falls
+          back as ttft_ms when zero tokens are generated (immediate EOS).
+        - seed: reproducible sampling (forwarded to create_completion, or
+          seeding the dist sampler of the constrained loop).
+        - Grammar routing: with a grammar and grammar_first=False the
+          sample-then-validate loop runs (lce/sampling.py) — per-token
+          structural guarantee at ~lean cost; used_fallback reports whether
+          any token needed the full-vocab grammar rescue. grammar_first=True
+          keeps the upstream grammar-first chain via create_completion (the
+          pre-phase-4 behavior, for before/after benchmarking).
 
-        The llama context is reset before each attempt: Llama.generate
+        The llama context is reset before generation: Llama.generate
         otherwise reuses the KV state for common prompt prefixes, which made
         TTFT depend on call order (identical prompts measured ~10x faster on
         the second call). Resetting makes every transaction pay its full
@@ -878,18 +950,21 @@ existing measurement-semantics text and adds the new parameters):
         grammar = self._load_grammar(grammar_path) if grammar_path is not None else None
         # special=True matches _create_completion's internal tokenization of
         # string prompts, so this count equals what the model actually evaluates.
-        prompt_tokens = len(self._llm.tokenize(prompt.encode("utf-8"), special=True))
+        tokens = self._llm.tokenize(prompt.encode("utf-8"), special=True)
+        prompt_tokens = len(tokens)
         start = time.perf_counter()
-        text, completion_tokens, ttft_ms = self._stream_once(
-            prompt, grammar=grammar, max_tokens=max_tokens, seed=seed,
-            grammar_first=grammar_first, start=start,
-        )
         used_fallback = False
-        if grammar is not None and validate is not None and not validate(text):
-            used_fallback = True
-            text, completion_tokens, _ = self._stream_once(
+        if grammar is not None and not grammar_first:
+            text, completion_tokens, ttft_ms, used_fallback = (
+                self._constrained_loop(
+                    tokens, grammar=grammar, max_tokens=max_tokens,
+                    seed=seed, start=start,
+                )
+            )
+        else:
+            text, completion_tokens, ttft_ms = self._stream_completion(
                 prompt, grammar=grammar, max_tokens=max_tokens, seed=seed,
-                grammar_first=True, start=start,
+                start=start,
             )
         total_ms = (time.perf_counter() - start) * 1000.0
         return GenerationResult(
@@ -901,18 +976,16 @@ existing measurement-semantics text and adds the new parameters):
             used_fallback=used_fallback,
         )
 
-    def _stream_once(
+    def _stream_completion(
         self,
         prompt: str,
         *,
         grammar,
         max_tokens: int,
         seed: int | None,
-        grammar_first: bool,
         start: float,
     ) -> tuple[str, int, float | None]:
-        """One streamed attempt: (text, completion_tokens, ttft_ms or None)."""
-        self._llm.grammar_first = grammar_first
+        """create_completion streaming: (text, completion_tokens, ttft_ms)."""
         self._llm.reset()  # defeat prefix-match KV reuse (see generate docstring)
         pieces: list[str] = []
         completion_tokens = 0
@@ -928,13 +1001,46 @@ existing measurement-semantics text and adds the new parameters):
             pieces.append(choice["text"])
             completion_tokens += 1
         return "".join(pieces), completion_tokens, ttft_ms
+
+    def _constrained_loop(
+        self,
+        tokens: list[int],
+        *,
+        grammar,
+        max_tokens: int,
+        seed: int | None,
+        start: float,
+    ) -> tuple[str, int, float | None, bool]:
+        """Sample-then-validate decode loop (phase-4 spec §4, approach B)."""
+        import lce.sampling
+
+        sampler = lce.sampling.SampleThenValidate(self._llm, grammar, seed)
+        self._llm.reset()  # defeat prefix-match KV reuse (see generate docstring)
+        self._llm.eval(tokens)
+        pieces = bytearray()
+        completion_tokens = 0
+        ttft_ms: float | None = None
+        while completion_tokens < max_tokens:
+            tok = sampler.sample_token()
+            if sampler.is_eog(tok):
+                break
+            if ttft_ms is None:
+                ttft_ms = (time.perf_counter() - start) * 1000.0
+            pieces += self._llm.detokenize([tok])
+            completion_tokens += 1
+            self._llm.eval([tok])
+        return (
+            pieces.decode("utf-8", errors="replace"),
+            completion_tokens,
+            ttft_ms,
+            sampler.rescued,
+        )
 ```
 
 - [ ] **Step 4: Run tests to verify they pass**
 
 Run: `uv run pytest tests/test_engine.py -v`
-Expected: all pass (old `_FakeLlama` tests work unchanged — plain attribute
-assignment of `grammar_first` succeeds on any object)
+Expected: all pass (old `_FakeLlama` tests work unchanged)
 
 - [ ] **Step 5: Run the full unit suite and the GPU suite**
 
@@ -949,7 +1055,7 @@ engine's Llama class, which every GPU test exercises
 
 ```bash
 git add lce/engine.py tests/test_engine.py
-git commit -m "feat: engine fallback net + grammar_first; PostTopKGrammarLlama wired"
+git commit -m "feat: engine constrained decode loop (sample-then-validate) + grammar_first"
 ```
 
 ---
@@ -973,11 +1079,9 @@ class FakeEngine:
         self.kwargs_seen = []
 
     def generate(self, prompt, *, grammar_path=None, max_tokens=128, seed=None,
-                 validate=None, grammar_first=False):
+                 grammar_first=False):
         self.calls.append((prompt, grammar_path, seed))
-        self.kwargs_seen.append(
-            {"validate": validate, "grammar_first": grammar_first}
-        )
+        self.kwargs_seen.append({"grammar_first": grammar_first})
         return GenerationResult(
             text=VALID,
             prompt_tokens=len(prompt) // 4,
@@ -995,7 +1099,6 @@ import json
 import pytest
 
 from lce.bench import BenchOnBatteryError
-from lce.engine import validate_routing_output
 
 
 def snap_ac():
@@ -1108,7 +1211,7 @@ def test_machine_summary_in_aggregates(tmp_path):
     assert machine["gpu_sm_mhz_max"] == 1695
 
 
-def test_validator_only_for_grammar_arm_and_grammar_first_forwarded(tmp_path):
+def test_grammar_first_forwarded_to_engine(tmp_path):
     engine = FakeEngine()
     run_benchmark(
         "rb6",
@@ -1120,12 +1223,7 @@ def test_validator_only_for_grammar_arm_and_grammar_first_forwarded(tmp_path):
         machine_state_fn=snap_ac,
         grammar_first=True,
     )
-    for (_, grammar_path, _), kw in zip(engine.calls, engine.kwargs_seen):
-        assert kw["grammar_first"] is True
-        if grammar_path is None:
-            assert kw["validate"] is None
-        else:
-            assert kw["validate"] is validate_routing_output
+    assert all(kw["grammar_first"] is True for kw in engine.kwargs_seen)
 
 
 def test_grammar_fallback_count_in_aggregates(tmp_path):
@@ -1227,7 +1325,6 @@ Replace the inner rep loop body with:
                         grammar_path=grammar,
                         max_tokens=128,
                         seed=rep_seed,
-                        validate=validate_routing_output if grammar else None,
                         grammar_first=grammar_first,
                     )
                     rec.set_result(
@@ -1490,7 +1587,6 @@ def test_three_arms_end_to_end(tmp_path):
                 grammar_path=grammar,
                 max_tokens=128,
                 seed=42,
-                validate=validate_routing_output if grammar else None,
             )
             rec.set_result(
                 prompt_tokens=result.prompt_tokens,
@@ -1503,7 +1599,7 @@ def test_three_arms_end_to_end(tmp_path):
         prompt_tokens[arm] = result.prompt_tokens
         texts[arm] = result.text
         assert result.used_fallback is False, (
-            f"{arm}: post-top-k grammar must not need the fallback path here"
+            f"{arm}: sample-then-validate must not need a rescue here"
         )
     rows = sqlite3.connect(tmp_path / "logs.db").execute(
         "SELECT mode, format_success FROM transactions ORDER BY id"
@@ -1514,10 +1610,31 @@ def test_three_arms_end_to_end(tmp_path):
         f"lean must use fewer prompt tokens: {prompt_tokens}"
     )
     assert texts["lean_grammar"] == texts["lean"], (
-        "same prompt + same seed: the post-top-k grammar mask must not alter "
-        f"an already-valid sample; lean={texts['lean']!r} "
-        f"grammar={texts['lean_grammar']!r}"
+        "same prompt + same seed: sample-then-validate shares the lean "
+        "chain's RNG stream, so an already-valid sample must be unchanged; "
+        f"lean={texts['lean']!r} grammar={texts['lean_grammar']!r}"
     )
+```
+
+Append the abort-regression test to `tests/test_e2e.py` (the exact workload
+that exposed approach A's SIGABRT — unseeded, full battery, grammar arm):
+
+```python
+@pytest.mark.gpu
+def test_unseeded_grammar_battery_never_aborts(tmp_path):
+    from lce.bench import GRAMMAR_PATH, QUERY_BATTERY
+
+    retriever = Retriever(tmp_path / "chroma")
+    index_tree(retriever, ".")
+    engine = Engine(MODEL)
+    for query in QUERY_BATTERY:
+        docs = retriever.query(query, mode="lean", k=3)
+        prompt = build_prompt(query, docs, "lean")
+        result = engine.generate(prompt, grammar_path=GRAMMAR, max_tokens=128)
+        assert validate_routing_output(result.text), (
+            f"grammar arm must stay structurally valid; query={query!r} "
+            f"text={result.text!r} rescued={result.used_fallback}"
+        )
 ```
 
 - [ ] **Step 2: Extend the benchmark-suite test**
@@ -1623,8 +1740,10 @@ In `docs/findings.md`:
      ~250-510 ms) and the methodology change: per-transaction
      `machine_state` telemetry + battery gate (`BenchOnBatteryError`,
      `--allow-battery`).
-   - The fix: post-top-k grammar chain (`lce/sampling.py`) + validate-and-
-     retry-grammar-first net (`grammar_fallback` column; count from the runs).
+   - The fix: sample-then-validate constrained decoding (`lce/sampling.py`),
+     including why the simpler post-top-k reorder was rejected (C-level
+     abort on the empty-candidate edge, ~1/30 unseeded battery passes);
+     `grammar_fallback` column counts full-vocab rescues (from the runs).
    - The before/after per-arm tables: paste both printed tables (runs
      `phase4-before` / `phase4-after`) including the machine footers, and
      state the headline delta (lean_grammar total_ms before vs after, and vs
@@ -1655,7 +1774,8 @@ git commit -m "docs: Fase 4 findings — grammar latency root cause, honest befo
 ## Plan Self-Review (completed at write time)
 
 - **Spec coverage:** §4 snapshot/gate/telemetry → Tasks 1, 2, 5, 6; §4
-  sampler/fallback/grammar_first → Tasks 3, 4; §5 tests → Tasks 1–7; §6
+  sample-then-validate/grammar_first → Tasks 3, 4 (amended); §5 tests →
+  Tasks 1–7 (incl. the unseeded abort-regression GPU test); §6
   protocol/findings/DB cleanup → Task 8; §7 error handling → Tasks 1, 5, 6.
 - **Type consistency:** `snapshot()` keys match Task 2's SNAP and Task 5's
   helpers; `BenchOnBatteryError` named identically in Tasks 5, 6;
