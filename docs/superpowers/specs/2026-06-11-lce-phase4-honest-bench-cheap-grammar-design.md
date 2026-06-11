@@ -89,8 +89,10 @@ accepts `machine_state: dict | None` and `grammar_fallback: bool = False`.
 
 **Battery gate.** `run_benchmark(allow_battery=False, ...)` takes one
 snapshot before loading the engine: `ac_online is False` and not
-`allow_battery` → message to stderr naming `--allow-battery`, exit 2 (CLI
-maps it like existing argument errors). `True` or `None` proceeds. During
+`allow_battery` → raise `BenchOnBatteryError` (new, in `lce/bench.py`);
+`lce/cli.py` catches it, prints a message naming `--allow-battery` to
+stderr, and exits 2 like existing argument errors. `True` or `None`
+proceeds. During
 the run, each transaction stores its own snapshot; the printed table gains a
 footer: `battery transactions: N/270; gpu sm clocks: min–max MHz` (omitted
 when no snapshot captured GPU data).
@@ -133,9 +135,10 @@ Unit (no GPU):
 - Telemetry migration: open a DB file created with the phase-3 schema,
   assert both columns appear, old rows readable, new rows round-trip the
   JSON snapshot and fallback flag.
-- Gate: fake-engine bench with injected snapshot — battery → exit 2 naming
-  `--allow-battery`; `allow_battery=True` proceeds; `ac_online=None`
-  proceeds.
+- Gate: fake-engine bench with injected snapshot — battery →
+  `BenchOnBatteryError` raised before engine construction;
+  `allow_battery=True` proceeds; `ac_online=None` proceeds. CLI level:
+  the error maps to exit 2 with a message naming `--allow-battery`.
 - Fallback: fake engine whose first generation fails `validate`, second
   (grammar-first) passes — assert one retry, `used_fallback=True`, timing
   semantics (total spans both, ttft from first, ctok from final), and the
@@ -176,8 +179,9 @@ No timing assertions anywhere (see §2).
 
 ## 7. Error Handling
 
-`snapshot()` never raises; per-field `None` degradation. Battery gate → exit
-2 (consistent with existing CLI argument errors). Engine fallback retries at
+`snapshot()` never raises; per-field `None` degradation. Battery gate:
+`BenchOnBatteryError` from the library, exit 2 at the CLI (consistent with
+existing argument errors). Engine fallback retries at
 most once and only when both grammar and validator are present. `nvidia-smi`
 subprocess: 2 s timeout, output parsed defensively. Telemetry migration is
 idempotent (column-presence check before `ALTER TABLE`).
