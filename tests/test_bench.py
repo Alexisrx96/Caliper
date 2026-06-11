@@ -1,7 +1,16 @@
 """Bench runner with a fake engine against the fixture tree (no GPU)."""
+import json
 import sqlite3
 
-from lce.bench import ARMS, QUERY_BATTERY, corpus_compression, run_benchmark
+import pytest
+
+from lce.bench import (
+    ARMS,
+    QUERY_BATTERY,
+    BenchOnBatteryError,
+    corpus_compression,
+    run_benchmark,
+)
 from lce.engine import GenerationResult
 from lce.indexer import index_tree
 from lce.retriever import Retriever
@@ -14,12 +23,28 @@ PROSE_MD = "# Guide\n\n" + "\n\n".join(
 )
 
 
+def snap_ac():
+    return {"ac_online": True, "battery_status": "Full",
+            "cpu_governor": "powersave", "cpu_freq_mhz": 3000.0,
+            "gpu": {"pstate": "P0", "sm_mhz": 1695, "temp_c": 50,
+                    "power_w": 50.0}}
+
+
+def snap_battery():
+    s = snap_ac()
+    s["ac_online"] = False
+    return s
+
+
 class FakeEngine:
     def __init__(self):
         self.calls = []
+        self.kwargs_seen = []
 
-    def generate(self, prompt, *, grammar_path=None, max_tokens=128, seed=None):
+    def generate(self, prompt, *, grammar_path=None, max_tokens=128, seed=None,
+                 grammar_first=False):
         self.calls.append((prompt, grammar_path, seed))
+        self.kwargs_seen.append({"grammar_first": grammar_first})
         return GenerationResult(
             text=VALID,
             prompt_tokens=len(prompt) // 4,
@@ -38,12 +63,13 @@ def test_run_benchmark_logs_all_transactions(tmp_path):
         repo_root="tests/fixtures",
         reps=3,
         engine=engine,
+        machine_state_fn=snap_ac,
     )
     rows = sqlite3.connect(tmp_path / "logs.db").execute(
         "SELECT mode, COUNT(*) FROM transactions GROUP BY mode"
     ).fetchall()
     assert dict(rows) == {arm: len(QUERY_BATTERY) * 3 for arm in ARMS}
-    assert set(aggregates) == set(ARMS) | {"corpus_compression"}
+    assert set(aggregates) == set(ARMS) | {"corpus_compression", "machine"}
     assert "overall" in aggregates["corpus_compression"]
     assert aggregates["naive"]["prompt_savings_pct"] == 0.0
     for arm in ARMS:
@@ -60,6 +86,7 @@ def test_grammar_only_in_lean_grammar_arm(tmp_path):
         repo_root="tests/fixtures",
         reps=1,
         engine=engine,
+        machine_state_fn=snap_ac,
     )
     with_grammar = [c for c in engine.calls if c[1] is not None]
     assert len(with_grammar) == len(QUERY_BATTERY)
@@ -76,6 +103,7 @@ def test_seed_offsets_by_rep(tmp_path):
         reps=3,
         engine=engine,
         seed=100,
+        machine_state_fn=snap_ac,
     )
     seeds = [c[2] for c in engine.calls]
     assert len(seeds) == len(QUERY_BATTERY) * len(ARMS) * 3
@@ -94,6 +122,7 @@ def test_no_seed_passes_none(tmp_path):
         repo_root="tests/fixtures",
         reps=2,
         engine=engine,
+        machine_state_fn=snap_ac,
     )
     assert all(c[2] is None for c in engine.calls)
 
@@ -127,3 +156,116 @@ def test_corpus_compression_empty_index(tmp_path):
 def test_battery_has_30_unique_queries():
     assert len(QUERY_BATTERY) == 30
     assert len(set(QUERY_BATTERY)) == 30
+
+
+def test_battery_gate_raises_before_any_generation(tmp_path):
+    engine = FakeEngine()
+    with pytest.raises(BenchOnBatteryError, match="--allow-battery"):
+        run_benchmark(
+            "rb1",
+            db_path=tmp_path / "logs.db",
+            persist_dir=tmp_path / "chroma",
+            repo_root="tests/fixtures",
+            reps=1,
+            engine=engine,
+            machine_state_fn=snap_battery,
+        )
+    assert engine.calls == []
+
+
+def test_allow_battery_proceeds(tmp_path):
+    engine = FakeEngine()
+    run_benchmark(
+        "rb2",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=engine,
+        machine_state_fn=snap_battery,
+        allow_battery=True,
+    )
+    assert len(engine.calls) == len(QUERY_BATTERY) * len(ARMS)
+
+
+def test_unknown_power_state_proceeds(tmp_path):
+    none_snap = {"ac_online": None, "battery_status": None,
+                 "cpu_governor": None, "cpu_freq_mhz": None, "gpu": None}
+    engine = FakeEngine()
+    run_benchmark(
+        "rb3",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=engine,
+        machine_state_fn=lambda: none_snap,
+    )
+    assert len(engine.calls) == len(QUERY_BATTERY) * len(ARMS)
+
+
+def test_snapshots_stored_per_transaction(tmp_path):
+    engine = FakeEngine()
+    run_benchmark(
+        "rb4",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=engine,
+        machine_state_fn=snap_ac,
+    )
+    rows = sqlite3.connect(tmp_path / "logs.db").execute(
+        "SELECT machine_state FROM transactions"
+    ).fetchall()
+    assert len(rows) == len(QUERY_BATTERY) * len(ARMS)
+    assert all(json.loads(r[0])["ac_online"] is True for r in rows)
+
+
+def test_machine_summary_in_aggregates(tmp_path):
+    engine = FakeEngine()
+    aggregates = run_benchmark(
+        "rb5",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=engine,
+        machine_state_fn=snap_battery,
+        allow_battery=True,
+    )
+    machine = aggregates["machine"]
+    assert machine["transactions"] == len(QUERY_BATTERY) * len(ARMS)
+    assert machine["battery_transactions"] == machine["transactions"]
+    assert machine["gpu_sm_mhz_min"] == 1695
+    assert machine["gpu_sm_mhz_max"] == 1695
+
+
+def test_grammar_first_forwarded_to_engine(tmp_path):
+    engine = FakeEngine()
+    run_benchmark(
+        "rb6",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=engine,
+        machine_state_fn=snap_ac,
+        grammar_first=True,
+    )
+    assert all(kw["grammar_first"] is True for kw in engine.kwargs_seen)
+
+
+def test_grammar_fallback_count_in_aggregates(tmp_path):
+    engine = FakeEngine()
+    aggregates = run_benchmark(
+        "rb7",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=engine,
+        machine_state_fn=snap_ac,
+    )
+    for arm in ARMS:
+        assert aggregates[arm]["grammar_fallback_count"] == 0

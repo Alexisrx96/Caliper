@@ -60,6 +60,10 @@ ARMS = ("naive", "lean", "lean_grammar")
 _ARM_TO_RETRIEVAL_MODE = {"naive": "naive", "lean": "lean", "lean_grammar": "lean"}
 
 
+class BenchOnBatteryError(RuntimeError):
+    """Refusing to benchmark on battery power (phase-4 spec §4)."""
+
+
 def run_benchmark(
     run_id: str | None = None,
     *,
@@ -72,6 +76,9 @@ def run_benchmark(
     reindex: bool = False,
     seed: int | None = None,
     engine=None,
+    allow_battery: bool = False,
+    grammar_first: bool = False,
+    machine_state_fn=None,
 ) -> dict:
     """Run QUERY_BATTERY x ARMS x reps under one run_id.
 
@@ -89,7 +96,23 @@ def run_benchmark(
     before every generation, defeating llama.cpp's prefix-match KV reuse — without that
     reset, identical prompts measured ~10x faster TTFT on back-to-back calls,
     biasing arm and rep comparisons by run order.
+
+    Machine state (phase-4 spec §4): `machine_state_fn` (default
+    lce.machine_state.snapshot) is called once before the run — ac_online
+    False without allow_battery raises BenchOnBatteryError before the engine
+    loads — and once per transaction, stored in the machine_state telemetry
+    column. Latency on this hardware swings ~3x with power state, so rows
+    carry the state they ran under. grammar_first=True benchmarks the
+    pre-phase-4 grammar-first sampler chain (before/after comparisons).
     """
+    if machine_state_fn is None:
+        from lce.machine_state import snapshot as machine_state_fn
+    gate = machine_state_fn()
+    if gate.get("ac_online") is False and not allow_battery:
+        raise BenchOnBatteryError(
+            "machine is on battery power — latency numbers would not be"
+            " comparable across runs; plug in AC or pass --allow-battery"
+        )
     if run_id is None:
         run_id = time.strftime("bench-%Y%m%d-%H%M%S")
     retriever = Retriever(persist_dir)
@@ -102,6 +125,7 @@ def run_benchmark(
         engine = Engine(model_path)
     db = TelemetryDB(db_path)
     model_name = Path(model_path).name
+    snapshots: list[dict] = []
     for query in QUERY_BATTERY:
         for arm in ARMS:
             retrieval_mode = _ARM_TO_RETRIEVAL_MODE[arm]
@@ -110,11 +134,18 @@ def run_benchmark(
             grammar = GRAMMAR_PATH if arm == "lean_grammar" else None
             for rep in range(reps):
                 rep_seed = None if seed is None else seed + rep
+                snap = machine_state_fn()
+                snapshots.append(snap)
                 with db.record(
-                    run_id=run_id, mode=arm, model=model_name, query=query
+                    run_id=run_id, mode=arm, model=model_name, query=query,
+                    machine_state=snap,
                 ) as rec:
                     result = engine.generate(
-                        prompt, grammar_path=grammar, max_tokens=128, seed=rep_seed
+                        prompt,
+                        grammar_path=grammar,
+                        max_tokens=128,
+                        seed=rep_seed,
+                        grammar_first=grammar_first,
                     )
                     rec.set_result(
                         prompt_tokens=result.prompt_tokens,
@@ -122,12 +153,16 @@ def run_benchmark(
                         ttft_ms=result.ttft_ms,
                         response=result.text,
                         format_success=validate_routing_output(result.text),
+                        grammar_fallback=result.used_fallback,
                     )
     aggregates = _aggregate(db_path, run_id)
     _print_table(aggregates)
     compression = corpus_compression(retriever)
     _print_compression_table(compression)
     aggregates["corpus_compression"] = compression
+    machine = _machine_summary(snapshots)
+    _print_machine_footer(machine)
+    aggregates["machine"] = machine
     return aggregates
 
 
@@ -138,7 +173,8 @@ def _aggregate(db_path: str | Path, run_id: str) -> dict[str, dict[str, float]]:
     try:
         rows = conn.execute(
             "SELECT mode, prompt_tokens, ttft_ms, total_latency_ms,"
-            " format_success FROM transactions WHERE run_id = ?",
+            " format_success, grammar_fallback FROM transactions"
+            " WHERE run_id = ?",
             (run_id,),
         ).fetchall()
     finally:
@@ -155,6 +191,7 @@ def _aggregate(db_path: str | Path, run_id: str) -> dict[str, dict[str, float]]:
             "ttft_ms_p50": statistics.median(r[2] for r in arm_rows),
             "total_ms_mean": statistics.fmean(r[3] for r in arm_rows),
             "format_success_rate": statistics.fmean(r[4] for r in arm_rows),
+            "grammar_fallback_count": sum(r[5] for r in arm_rows),
         }
     naive_mean = per_arm.get("naive", {}).get("prompt_tokens_mean")
     for stats in per_arm.values():
@@ -183,6 +220,33 @@ def _print_table(aggregates: dict[str, dict[str, float]]) -> None:
             f"{s['ttft_ms_p50']:>8.1f}{s['total_ms_mean']:>10.1f}"
             f"{s['format_success_rate']:>8.2f}"
         )
+
+
+def _machine_summary(snapshots: list[dict]) -> dict:
+    """Footer data: battery contamination count and GPU clock range."""
+    sm = [s["gpu"]["sm_mhz"] for s in snapshots if s.get("gpu")]
+    return {
+        "transactions": len(snapshots),
+        "battery_transactions": sum(
+            1 for s in snapshots if s.get("ac_online") is False
+        ),
+        "gpu_sm_mhz_min": min(sm) if sm else None,
+        "gpu_sm_mhz_max": max(sm) if sm else None,
+    }
+
+
+def _print_machine_footer(machine: dict) -> None:
+    line = (
+        f"machine: battery transactions"
+        f" {machine['battery_transactions']}/{machine['transactions']}"
+    )
+    if machine["gpu_sm_mhz_min"] is not None:
+        line += (
+            f"; gpu sm clocks {machine['gpu_sm_mhz_min']}"
+            f"-{machine['gpu_sm_mhz_max']} MHz"
+        )
+    print()
+    print(line)
 
 
 def corpus_compression(retriever) -> dict:
