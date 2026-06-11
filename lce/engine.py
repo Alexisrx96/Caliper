@@ -71,6 +71,7 @@ class Engine:
         *,
         grammar_path: str | Path | None = None,
         max_tokens: int = 256,
+        seed: int | None = None,
     ) -> GenerationResult:
         """Stream a completion and measure it.
 
@@ -83,6 +84,10 @@ class Engine:
           Grammar compilation is cached per path and excluded by design.
         - total_ms: time from generation start to stream end. Falls back as
           ttft_ms when zero tokens are generated (immediate EOS).
+        - seed: forwarded to create_completion for reproducible sampling.
+          llama-cpp-python 0.3.28 accepts the kwarg natively (verified via
+          inspect.signature), so no set_seed fallback is needed. None keeps
+          the current sampled behavior.
 
         The llama context is reset before each call: Llama.generate otherwise
         reuses the KV state for common prompt prefixes, which made TTFT depend
@@ -100,7 +105,7 @@ class Engine:
         ttft_ms: float | None = None
         start = time.perf_counter()
         for chunk in self._llm.create_completion(
-            prompt, max_tokens=max_tokens, grammar=grammar, stream=True
+            prompt, max_tokens=max_tokens, grammar=grammar, stream=True, seed=seed
         ):
             choice = chunk["choices"][0]
             if choice["finish_reason"] is not None:

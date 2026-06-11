@@ -31,6 +31,7 @@ class _FakeLlama:
     def __init__(self, texts):
         self._texts = texts
         self.reset_calls = 0
+        self.seen_seeds = []
 
     def reset(self):
         self.reset_calls += 1
@@ -38,7 +39,8 @@ class _FakeLlama:
     def tokenize(self, data, special=True):
         return list(range(7))  # 7 prompt tokens
 
-    def create_completion(self, prompt, *, max_tokens, grammar, stream):
+    def create_completion(self, prompt, *, max_tokens, grammar, stream, seed=None):
+        self.seen_seeds.append(seed)
         for t in self._texts:
             yield {"choices": [{"text": t, "finish_reason": None}]}
         yield {"choices": [{"text": "", "finish_reason": "stop"}]}
@@ -67,3 +69,12 @@ def test_generate_zero_tokens_ttft_falls_back_to_total(tmp_path):
     assert result.completion_tokens == 0
     assert result.text == ""
     assert result.ttft_ms == result.total_ms
+
+
+def test_generate_forwards_seed():
+    engine = Engine.__new__(Engine)
+    engine._llm = _FakeLlama(["a"])
+    engine._grammar_cache = {}
+    engine.generate("hi", seed=7)
+    engine.generate("hi")
+    assert engine._llm.seen_seeds == [7, None]
