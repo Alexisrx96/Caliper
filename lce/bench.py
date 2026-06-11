@@ -56,11 +56,13 @@ def run_benchmark(
     k: int = 3,
     reindex: bool = False,
     engine=None,
-) -> dict[str, dict[str, float]]:
+) -> dict:
     """Run QUERY_BATTERY x ARMS x reps under one run_id.
 
     Logs every transaction to `db_path`, prints the comparison table, and
-    returns the per-arm aggregate dict (see _aggregate).
+    returns the per-arm aggregate dict (see _aggregate) plus a
+    `"corpus_compression"` key (see corpus_compression); arm entries keep
+    their per-arm shape.
 
     Statistical notes: prompt_tokens is identical across reps for a given
     (query, arm), so prompt_savings_pct has an effective sample size of
@@ -105,6 +107,9 @@ def run_benchmark(
                     )
     aggregates = _aggregate(db_path, run_id)
     _print_table(aggregates)
+    compression = corpus_compression(retriever)
+    _print_compression_table(compression)
+    aggregates["corpus_compression"] = compression
     return aggregates
 
 
@@ -159,4 +164,56 @@ def _print_table(aggregates: dict[str, dict[str, float]]) -> None:
             f"{s['prompt_savings_pct']:>10.1f}{s['ttft_ms_mean']:>10.1f}"
             f"{s['ttft_ms_p50']:>8.1f}{s['total_ms_mean']:>10.1f}"
             f"{s['format_success_rate']:>8.2f}"
+        )
+
+
+def corpus_compression(retriever) -> dict:
+    """Per-kind char compression of the indexed corpus (phase-3 spec §4).
+
+    Deterministic and model-free: sums document characters in both
+    collections grouped by `kind` metadata. Raw chunks reconstruct the full
+    text, so their sum equals the raw corpus size; skeletons are stored
+    whole. Uses the retriever's private `_collection` accessor on purpose —
+    phase 3 adds no new public Retriever API (spec §2, YAGNI).
+    Empty index → {}.
+    """
+    sums: dict[str, dict[str, int]] = {}
+    for field, mode in (("raw_chars", "naive"), ("skeleton_chars", "lean")):
+        res = retriever._collection(mode).get(include=["documents", "metadatas"])
+        for doc, meta in zip(res["documents"], res["metadatas"]):
+            kind = (meta or {}).get("kind")
+            if kind is None:
+                continue
+            entry = sums.setdefault(kind, {"raw_chars": 0, "skeleton_chars": 0})
+            entry[field] += len(doc)
+    if not sums:
+        return {}
+    result = {kind: _with_reduction(entry) for kind, entry in sorted(sums.items())}
+    result["overall"] = _with_reduction(
+        {
+            "raw_chars": sum(e["raw_chars"] for e in sums.values()),
+            "skeleton_chars": sum(e["skeleton_chars"] for e in sums.values()),
+        }
+    )
+    return result
+
+
+def _with_reduction(entry: dict[str, int]) -> dict[str, float]:
+    raw, skeleton = entry["raw_chars"], entry["skeleton_chars"]
+    pct = 0.0 if raw == 0 else (1 - skeleton / raw) * 100.0
+    return {"raw_chars": raw, "skeleton_chars": skeleton, "reduction_pct": pct}
+
+
+def _print_compression_table(comp: dict) -> None:
+    if not comp:
+        return
+    header = f"{'kind':<10}{'raw_chars':>12}{'skeleton':>12}{'reduction%':>12}"
+    print()
+    print(header)
+    print("-" * len(header))
+    for kind in [k for k in comp if k != "overall"] + ["overall"]:
+        e = comp[kind]
+        print(
+            f"{kind:<10}{e['raw_chars']:>12}{e['skeleton_chars']:>12}"
+            f"{e['reduction_pct']:>12.1f}"
         )
