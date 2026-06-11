@@ -171,10 +171,11 @@ def corpus_compression(retriever) -> dict:
     """Per-kind char compression of the indexed corpus (phase-3 spec §4).
 
     Deterministic and model-free: sums document characters in both
-    collections grouped by `kind` metadata. Raw chunks reconstruct the full
-    text, so their sum equals the raw corpus size; skeletons are stored
-    whole. Uses the retriever's private `_collection` accessor on purpose —
-    phase 3 adds no new public Retriever API (spec §2, YAGNI).
+    collections grouped by `kind` metadata. Raw chunks approximately
+    reconstruct the full text (the chunker drops the blank-line separator
+    between chunks, ~2 chars per boundary — noise for a ratio); skeletons
+    are stored whole. Uses the retriever's private `_collection` accessor on
+    purpose — phase 3 adds no new public Retriever API (spec §2, YAGNI).
     Empty index → {}.
     """
     sums: dict[str, dict[str, int]] = {}
