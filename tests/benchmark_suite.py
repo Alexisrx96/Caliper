@@ -16,6 +16,6 @@ def test_benchmark_suite(tmp_path):
         persist_dir=tmp_path / "chroma",
         reps=1,
     )
-    assert set(aggregates) == set(ARMS)
-    for stats in aggregates.values():
-        assert stats["n"] == len(QUERY_BATTERY)
+    assert set(aggregates) == set(ARMS) | {"corpus_compression"}
+    for arm in ARMS:
+        assert aggregates[arm]["n"] == len(QUERY_BATTERY)
