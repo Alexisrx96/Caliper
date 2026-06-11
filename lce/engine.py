@@ -18,6 +18,7 @@ class GenerationResult:
     completion_tokens: int
     ttft_ms: float
     total_ms: float
+    used_fallback: bool = False
 
 
 class EngineLoadError(RuntimeError):
@@ -72,38 +73,77 @@ class Engine:
         grammar_path: str | Path | None = None,
         max_tokens: int = 256,
         seed: int | None = None,
+        grammar_first: bool = False,
     ) -> GenerationResult:
-        """Stream a completion and measure it.
+        """Generate a completion and measure it.
 
-        Measurement semantics (foundation spec §5):
+        Measurement semantics (foundation spec §5, phase-4 spec §4):
         - prompt_tokens: llama.cpp tokenization (special=True) of `prompt`,
           identical to what create_completion evaluates.
-        - completion_tokens: count of streamed content chunks (one per token);
-          the trailing finish_reason sentinel chunk is excluded.
-        - ttft_ms: time from generation start to the first content chunk.
+        - completion_tokens: generated tokens; the EOG token and the
+          create_completion finish-reason sentinel are excluded.
+        - ttft_ms: time from generation start to the first token.
           Grammar compilation is cached per path and excluded by design.
-        - total_ms: time from generation start to stream end. Falls back as
-          ttft_ms when zero tokens are generated (immediate EOS).
-        - seed: forwarded to create_completion for reproducible sampling.
-          llama-cpp-python 0.3.28 accepts the kwarg natively (verified via
-          inspect.signature), so no set_seed fallback is needed. None keeps
-          the current sampled behavior.
+        - total_ms: time from generation start to generation end. Falls
+          back as ttft_ms when zero tokens are generated (immediate EOS).
+        - seed: reproducible sampling (forwarded to create_completion, or
+          seeding the dist sampler of the constrained loop).
+        - Grammar routing: with a grammar and grammar_first=False the
+          sample-then-validate loop runs (lce/sampling.py) — per-token
+          structural guarantee at ~lean cost; used_fallback reports whether
+          any token needed the full-vocab grammar rescue. grammar_first=True
+          keeps the upstream grammar-first chain via create_completion (the
+          pre-phase-4 behavior, for before/after benchmarking).
 
-        The llama context is reset before each call: Llama.generate otherwise
-        reuses the KV state for common prompt prefixes, which made TTFT depend
-        on call order (identical prompts measured ~10x faster on the second
-        call). Resetting makes every transaction pay its full prompt eval, so
-        ttft_ms is comparable across arms and reps.
+        The llama context is reset before generation: Llama.generate
+        otherwise reuses the KV state for common prompt prefixes, which made
+        TTFT depend on call order (identical prompts measured ~10x faster on
+        the second call). Resetting makes every transaction pay its full
+        prompt eval, so ttft_ms is comparable across arms and reps.
         """
         grammar = self._load_grammar(grammar_path) if grammar_path is not None else None
         # special=True matches _create_completion's internal tokenization of
         # string prompts, so this count equals what the model actually evaluates.
-        prompt_tokens = len(self._llm.tokenize(prompt.encode("utf-8"), special=True))
-        self._llm.reset()  # defeat prefix-match KV reuse (see docstring)
+        tokens = self._llm.tokenize(prompt.encode("utf-8"), special=True)
+        prompt_tokens = len(tokens)
+        start = time.perf_counter()
+        used_fallback = False
+        if grammar is not None and not grammar_first:
+            text, completion_tokens, ttft_ms, used_fallback = (
+                self._constrained_loop(
+                    tokens, grammar=grammar, max_tokens=max_tokens,
+                    seed=seed, start=start,
+                )
+            )
+        else:
+            text, completion_tokens, ttft_ms = self._stream_completion(
+                prompt, grammar=grammar, max_tokens=max_tokens, seed=seed,
+                start=start,
+            )
+        total_ms = (time.perf_counter() - start) * 1000.0
+        return GenerationResult(
+            text=text,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            ttft_ms=total_ms if ttft_ms is None else ttft_ms,
+            total_ms=total_ms,
+            used_fallback=used_fallback,
+        )
+
+    def _stream_completion(
+        self,
+        prompt: str,
+        *,
+        grammar,
+        max_tokens: int,
+        seed: int | None,
+        start: float,
+    ) -> tuple[str, int, float | None]:
+        """create_completion streaming: (text, completion_tokens, ttft_ms)."""
+        self._llm.reset()  # defeat prefix-match KV reuse (see generate docstring)
         pieces: list[str] = []
         completion_tokens = 0
         ttft_ms: float | None = None
-        start = time.perf_counter()
         for chunk in self._llm.create_completion(
             prompt, max_tokens=max_tokens, grammar=grammar, stream=True, seed=seed
         ):
@@ -114,13 +154,40 @@ class Engine:
                 ttft_ms = (time.perf_counter() - start) * 1000.0
             pieces.append(choice["text"])
             completion_tokens += 1
-        total_ms = (time.perf_counter() - start) * 1000.0
-        return GenerationResult(
-            text="".join(pieces),
-            prompt_tokens=prompt_tokens,
-            completion_tokens=completion_tokens,
-            ttft_ms=total_ms if ttft_ms is None else ttft_ms,
-            total_ms=total_ms,
+        return "".join(pieces), completion_tokens, ttft_ms
+
+    def _constrained_loop(
+        self,
+        tokens: list[int],
+        *,
+        grammar,
+        max_tokens: int,
+        seed: int | None,
+        start: float,
+    ) -> tuple[str, int, float | None, bool]:
+        """Sample-then-validate decode loop (phase-4 spec §4, approach B)."""
+        import lce.sampling
+
+        sampler = lce.sampling.SampleThenValidate(self._llm, grammar, seed)
+        self._llm.reset()  # defeat prefix-match KV reuse (see generate docstring)
+        self._llm.eval(tokens)
+        pieces = bytearray()
+        completion_tokens = 0
+        ttft_ms: float | None = None
+        while completion_tokens < max_tokens:
+            tok = sampler.sample_token()
+            if sampler.is_eog(tok):
+                break
+            if ttft_ms is None:
+                ttft_ms = (time.perf_counter() - start) * 1000.0
+            pieces += self._llm.detokenize([tok])
+            completion_tokens += 1
+            self._llm.eval([tok])
+        return (
+            pieces.decode("utf-8", errors="replace"),
+            completion_tokens,
+            ttft_ms,
+            sampler.rescued,
         )
 
 
