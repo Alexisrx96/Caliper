@@ -124,9 +124,20 @@ def bench(
     seed: Optional[int] = typer.Option(
         None, help="base seed; rep i of each (query, arm) uses seed+i"
     ),
+    allow_battery: bool = typer.Option(
+        False,
+        "--allow-battery",
+        help="run even on battery power (latency rows are flagged in telemetry)",
+    ),
+    grammar_first: bool = typer.Option(
+        False,
+        "--grammar-first",
+        help="use the slow pre-phase-4 grammar-first sampler chain"
+        " (before/after comparisons)",
+    ),
 ) -> None:
     """Run the fixed query battery through all three arms."""
-    from lce.bench import run_benchmark
+    from lce.bench import BenchOnBatteryError, run_benchmark
     from lce.engine import EngineLoadError
 
     try:
@@ -138,7 +149,12 @@ def bench(
             reps=reps,
             reindex=reindex,
             seed=seed,
+            allow_battery=allow_battery,
+            grammar_first=grammar_first,
         )
+    except BenchOnBatteryError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2)
     except EngineLoadError as exc:
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=1)

@@ -129,3 +129,45 @@ def test_bench_passes_seed(monkeypatch):
     result = runner.invoke(app, ["bench", "--seed", "42"])
     assert result.exit_code == 0, result.output
     assert captured["seed"] == 42
+
+
+def test_bench_passes_phase4_flags(monkeypatch):
+    captured = {}
+
+    def fake_run_benchmark(run_id, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("lce.bench.run_benchmark", fake_run_benchmark)
+    result = runner.invoke(app, ["bench", "--allow-battery", "--grammar-first"])
+    assert result.exit_code == 0, result.output
+    assert captured["allow_battery"] is True
+    assert captured["grammar_first"] is True
+
+
+def test_bench_defaults_phase4_flags_off(monkeypatch):
+    captured = {}
+
+    def fake_run_benchmark(run_id, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("lce.bench.run_benchmark", fake_run_benchmark)
+    result = runner.invoke(app, ["bench"])
+    assert result.exit_code == 0, result.output
+    assert captured["allow_battery"] is False
+    assert captured["grammar_first"] is False
+
+
+def test_bench_on_battery_exits_2(monkeypatch):
+    from lce.bench import BenchOnBatteryError
+
+    def fake_run_benchmark(run_id, **kwargs):
+        raise BenchOnBatteryError(
+            "machine is on battery power — plug in AC or pass --allow-battery"
+        )
+
+    monkeypatch.setattr("lce.bench.run_benchmark", fake_run_benchmark)
+    result = runner.invoke(app, ["bench"])
+    assert result.exit_code == 2
+    assert "--allow-battery" in result.output
