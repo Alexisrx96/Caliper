@@ -1,84 +1,109 @@
-"""Post-top-k grammar sampler chain (phase-4 spec §4).
+"""Sample-then-validate grammar sampling (phase-4 spec §4, approach B).
 
-Mirrors `llama_cpp.llama.Llama._init_sampler` of the pinned llama-cpp-python
-0.3.28 (llama.py:735-779) with exactly one change: the grammar sampler is
-added AFTER min_p — masking the <=top_k surviving candidates — instead of
-before top_k, where it masks the full ~152k-token vocab at ~+30 ms/token
-(measured; see docs/findings.md §9). Identical seeded output was measured
-for both orders on the routing task.
+Ports llama.cpp's common/sampling.cpp strategy (grammar_first=false): sample
+with the normal grammarless chain, check only the sampled token against the
+grammar, and on rejection apply the grammar mask to the FULL vocabulary
+before resampling. The full-vocab mask cannot empty the candidate set, so
+the post-top-k abort (std::runtime_error "Unexpected empty grammar stack")
+is structurally unreachable, and the common case costs one singleton
+grammar check (~µs) instead of a ~152k-token mask (~30 ms) per token.
 
-Any llama-cpp-python version bump must re-diff this override against the
-upstream method. Only the default sampling branch is mirrored (temp > 0, no
-mirostat, no logits_processor) — the engine never uses the others, and the
-override refuses them rather than silently mis-ordering.
+Chain parameters mirror create_completion's defaults in the pinned
+llama-cpp-python 0.3.28 so that, absent a rescue, the seeded RNG stream —
+and therefore the output — is identical to the grammarless path. A version
+bump must re-check these constants. The chain's internal accept of a
+subsequently-rescued token is harmless: with the default penalty parameters
+the penalties sampler is a no-op (same simplification llama.cpp makes).
 """
 from __future__ import annotations
 
+import ctypes
+
+import numpy as np
+
+import llama_cpp
 import llama_cpp._internals as internals
-from llama_cpp import Llama, LlamaGrammar
-from llama_cpp.llama import LogitsProcessorList
+
+# create_completion defaults in llama-cpp-python 0.3.28.
+CHAIN_DEFAULTS = {
+    "repeat_penalty": 1.0,
+    "frequency_penalty": 0.0,
+    "presence_penalty": 0.0,
+    "top_k": 40,
+    "typical_p": 1.0,
+    "top_p": 0.95,
+    "min_p": 0.05,
+    "temp": 0.80,
+}
+
+_TOKEN_DATA_DTYPE = np.dtype(
+    [("id", np.int32), ("logit", np.float32), ("p", np.float32)]
+)
 
 
-class PostTopKGrammarLlama(Llama):
-    # Set per call by Engine.generate before create_completion; True restores
-    # the upstream grammar-first chain (the structurally safe slow path).
-    grammar_first: bool = False
+class SampleThenValidate:
+    """Per-generation grammar-constrained sampler (one per generate call)."""
 
-    def _init_sampler(
-        self,
-        top_k: int = 40,
-        top_p: float = 0.95,
-        min_p: float = 0.05,
-        typical_p: float = 1.0,
-        temp: float = 0.80,
-        repeat_penalty: float = 1.0,
-        frequency_penalty: float = 0.0,
-        presence_penalty: float = 0.0,
-        tfs_z: float = 1.0,
-        mirostat_mode: int = 0,
-        mirostat_eta: float = 0.1,
-        mirostat_tau: float = 5.0,
-        penalize_nl: bool = True,
-        logits_processor: LogitsProcessorList | None = None,
-        grammar: LlamaGrammar | None = None,
-    ):
-        if grammar is None or self.grammar_first:
-            return super()._init_sampler(
-                top_k=top_k,
-                top_p=top_p,
-                min_p=min_p,
-                typical_p=typical_p,
-                temp=temp,
-                repeat_penalty=repeat_penalty,
-                frequency_penalty=frequency_penalty,
-                presence_penalty=presence_penalty,
-                tfs_z=tfs_z,
-                mirostat_mode=mirostat_mode,
-                mirostat_eta=mirostat_eta,
-                mirostat_tau=mirostat_tau,
-                penalize_nl=penalize_nl,
-                logits_processor=logits_processor,
-                grammar=grammar,
-            )
-        if temp <= 0.0 or mirostat_mode != 0 or logits_processor is not None:
-            raise NotImplementedError(
-                "PostTopKGrammarLlama mirrors only the default sampling branch"
-                " (temp > 0, no mirostat, no logits_processor); set"
-                " grammar_first=True for other configurations."
-            )
-        sampler = internals.LlamaSampler()
-        sampler.add_penalties(
-            penalty_last_n=self.last_n_tokens_size,
-            penalty_repeat=repeat_penalty,
-            penalty_freq=frequency_penalty,
-            penalty_present=presence_penalty,
-        )
+    def __init__(self, llm, grammar, seed: int | None) -> None:
+        self._llm = llm
+        self.rescued = False
         min_keep = 1  # upstream: max(1, n_probs) with n_probs = 0
-        sampler.add_top_k(top_k)
-        sampler.add_typical(typical_p, min_keep)
-        sampler.add_top_p(top_p, min_keep)
-        sampler.add_min_p(min_p, min_keep)
-        sampler.add_grammar(self._model, grammar)  # moved: post-truncation mask
-        sampler.add_temp(temp)
-        sampler.add_dist(self._seed)
-        return sampler
+        self._chain = internals.LlamaSampler()
+        self._chain.add_penalties(
+            penalty_last_n=llm.last_n_tokens_size,
+            penalty_repeat=CHAIN_DEFAULTS["repeat_penalty"],
+            penalty_freq=CHAIN_DEFAULTS["frequency_penalty"],
+            penalty_present=CHAIN_DEFAULTS["presence_penalty"],
+        )
+        self._chain.add_top_k(CHAIN_DEFAULTS["top_k"])
+        self._chain.add_typical(CHAIN_DEFAULTS["typical_p"], min_keep)
+        self._chain.add_top_p(CHAIN_DEFAULTS["top_p"], min_keep)
+        self._chain.add_min_p(CHAIN_DEFAULTS["min_p"], min_keep)
+        self._chain.add_temp(CHAIN_DEFAULTS["temp"])
+        self._chain.add_dist(
+            llama_cpp.LLAMA_DEFAULT_SEED if seed is None else seed
+        )
+        self._grammar = internals.LlamaSampler()
+        self._grammar.add_grammar(llm._model, grammar)
+
+    def sample_token(self) -> int:
+        """One grammar-valid token (or an EOG the grammar allows)."""
+        tok = self._chain.sample(self._llm._ctx, -1)
+        if self._grammar_allows(tok):
+            if not self.is_eog(tok):
+                self._grammar.accept(tok)
+            return tok
+        self.rescued = True
+        tok = self._rescue()
+        if not self.is_eog(tok):
+            self._grammar.accept(tok)
+        return tok
+
+    def is_eog(self, tok: int) -> bool:
+        return llama_cpp.llama_vocab_is_eog(self._llm._model.vocab, tok)
+
+    def _grammar_allows(self, tok: int) -> bool:
+        # Grammar apply masks invalid candidates to -inf; it validates EOG
+        # against stack-emptiness, and never mutates parse state.
+        data = (llama_cpp.llama_token_data * 1)(
+            llama_cpp.llama_token_data(tok, 0.0, 0.0)
+        )
+        arr = llama_cpp.llama_token_data_array(data, 1, -1, False)
+        llama_cpp.llama_sampler_apply(self._grammar.sampler, ctypes.byref(arr))
+        return data[0].logit != float("-inf")
+
+    def _rescue(self) -> int:
+        """Grammar-first resample over the FULL vocab (never empty)."""
+        n_vocab = self._llm._n_vocab
+        logits = np.ctypeslib.as_array(
+            self._llm._ctx.get_logits_ith(-1), shape=(n_vocab,)
+        )
+        buf = (llama_cpp.llama_token_data * n_vocab)()
+        view = np.frombuffer(buf, dtype=_TOKEN_DATA_DTYPE)
+        view["id"] = np.arange(n_vocab, dtype=np.int32)
+        view["logit"] = logits
+        view["p"] = 0.0
+        arr = llama_cpp.llama_token_data_array(buf, n_vocab, -1, False)
+        llama_cpp.llama_sampler_apply(self._grammar.sampler, ctypes.byref(arr))
+        llama_cpp.llama_sampler_apply(self._chain.sampler, ctypes.byref(arr))
+        return arr.data[arr.selected].id
