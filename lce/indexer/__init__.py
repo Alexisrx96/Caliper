@@ -64,6 +64,12 @@ def index_tree(retriever, root: str | Path) -> tuple[int, int]:
 
 
 def _markdown_skeleton(md: dict) -> str:
+    """Outline-only lean form: optional `title:` line + one line per header.
+
+    Summaries are dropped on purpose (phase-3 spec §4): for the routing task
+    the model needs to know which doc/section exists, not its content. Empty
+    result (no title, no headers) → caller's `file: <relpath>` fallback.
+    """
     lines = [f"title: {md['title']}"] if md["title"] else []
-    lines += [f"{s['header']}: {s['summary']}" for s in md["sections"]]
+    lines += [f"{'#' * h['level']} {h['text']}" for h in md["headers"]]
     return "\n".join(lines)

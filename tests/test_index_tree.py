@@ -35,22 +35,35 @@ def test_excludes_dot_and_artifact_dirs(tmp_path):
     assert (indexed, skipped) == (1, 0)
 
 
-def test_markdown_skeleton_is_lean(tmp_path):
+def test_markdown_skeleton_is_outline_only(tmp_path):
     tree = tmp_path / "tree"
     tree.mkdir()
     (tree / "note.md").write_text(
-        "# Big Title\n\nIntro text.\n\n## Alpha\n\nAlpha body.\n\n## Beta\n\nBeta body.\n"
+        "# Big Title\n\nIntro text.\n\n## Alpha\n\nAlpha body.\n\n"
+        "## Beta\n\nBeta body.\n\n### Beta Sub\n\nSub body.\n"
     )
     r = Retriever(tmp_path / "chroma")
     index_tree(r, tree)
     (doc,) = r.query("alpha", mode="lean", k=1)
     assert doc.text == (
         "title: Big Title\n"
-        "Big Title: Intro text.\n"
-        "Alpha: Alpha body.\n"
-        "Beta: Beta body."
+        "# Big Title\n"
+        "## Alpha\n"
+        "## Beta\n"
+        "### Beta Sub"
     )
-    assert "#" not in doc.text
+    for summary in ("Intro text.", "Alpha body.", "Beta body.", "Sub body."):
+        assert summary not in doc.text
+
+
+def test_markdown_without_headers_falls_back_to_filename(tmp_path):
+    tree = tmp_path / "tree"
+    tree.mkdir()
+    (tree / "plain.md").write_text("Just prose, no headers at all.\n")
+    r = Retriever(tmp_path / "chroma")
+    index_tree(r, tree)
+    (doc,) = r.query("prose", mode="lean", k=1)
+    assert doc.text == "file: plain.md"
 
 
 def test_unreadable_file_is_skipped(tmp_path, capsys):
