@@ -82,7 +82,8 @@ def test_unseeded_grammar_battery_never_aborts(tmp_path):
     retriever = Retriever(tmp_path / "chroma")
     index_tree(retriever, ".")
     engine = Engine(MODEL)
-    for query in QUERY_BATTERY:
+    for bq in QUERY_BATTERY:
+        query = bq.query
         docs = retriever.query(query, mode="lean", k=3)
         prompt = build_prompt(query, docs, "lean")
         result = engine.generate(prompt, grammar_path=GRAMMAR, max_tokens=128)

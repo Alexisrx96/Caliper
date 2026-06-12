@@ -1,5 +1,6 @@
 """Bench runner with a fake engine against the fixture tree (no GPU)."""
 import json
+import re
 import sqlite3
 
 import pytest
@@ -7,6 +8,7 @@ import pytest
 from lce.bench import (
     ARMS,
     QUERY_BATTERY,
+    BatteryQuery,
     BenchOnBatteryError,
     corpus_compression,
     run_benchmark,
@@ -153,9 +155,13 @@ def test_corpus_compression_empty_index(tmp_path):
     assert corpus_compression(Retriever(tmp_path / "chroma")) == {}
 
 
-def test_battery_has_30_unique_queries():
+def test_battery_has_30_unique_annotated_queries():
     assert len(QUERY_BATTERY) == 30
-    assert len(set(QUERY_BATTERY)) == 30
+    assert len({bq.query for bq in QUERY_BATTERY}) == 30
+    for bq in QUERY_BATTERY:
+        assert isinstance(bq.query, str) and bq.query
+        assert isinstance(bq.expect_target, re.Pattern)
+        assert bq.expect_target.flags & re.IGNORECASE
 
 
 def test_battery_gate_raises_before_any_generation(tmp_path):

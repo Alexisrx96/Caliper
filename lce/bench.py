@@ -5,11 +5,13 @@ the engine are injectable so tests can run without a GPU.
 """
 from __future__ import annotations
 
+import re
 import sqlite3
 import statistics
 import sys
 import time
 from pathlib import Path
+from typing import NamedTuple
 
 from lce.engine import validate_routing_output
 from lce.indexer import index_tree
@@ -19,40 +21,72 @@ from lce.telemetry import TelemetryDB
 
 GRAMMAR_PATH = Path("lce/grammars/router.gbnf")
 
+
+class BatteryQuery(NamedTuple):
+    """A battery entry: the query plus the expected-target regex (spec §4).
+
+    `expect_target` is matched with re.search against the routing JSON's
+    "target" field only. Compiled at import time (IGNORECASE) so a bad
+    pattern fails collection, not a mid-run transaction.
+    """
+
+    query: str
+    expect_target: re.Pattern[str]
+
+
+def _bq(query: str, pattern: str) -> BatteryQuery:
+    return BatteryQuery(query, re.compile(pattern, re.IGNORECASE))
+
+
 QUERY_BATTERY = [
-    # navigation (10)
-    "Where is the telemetry transaction schema defined?",
-    "Which function extracts the AST skeleton from a Python file?",
-    "Open the module that builds the ChatML prompts.",
-    "Where are the ChromaDB collection names declared?",
-    "Which script downloads the GGUF model?",
-    "Where is the markdown frontmatter parsed?",
-    "Which module defines the RetrievedDoc dataclass?",
-    "Where is the fixed query battery for the benchmark defined?",
-    "Which file contains the GBNF routing grammar?",
-    "Where is the prompt-token savings percentage computed?",
-    # lookup (10)
-    "What CLI command runs the benchmark?",
-    "What are the columns of the transactions table?",
-    "What is the default context size of the engine?",
-    "Which pytest marker excludes GPU tests?",
-    "What actions does the routing grammar allow?",
-    "What is the default number of repetitions per query in the benchmark?",
-    "What is the chunk size limit for raw documents?",
-    "What exit code does the CLI use for invalid arguments?",
-    "Which directories does the indexer always exclude?",
-    "What embedding model does the retriever use?",
-    # explanation (10)
-    "How does the engine enforce the routing grammar?",
-    "How does the retriever keep naive and lean comparisons fair?",
-    "How is TTFT measured during generation?",
-    "Why are embeddings computed on CPU instead of GPU?",
-    "How does telemetry avoid crashing an inference run?",
-    "How does the indexer decide which files to skip?",
-    "How are oversized documents split into chunks?",
-    "Why does the engine reset the llama context before each generation?",
-    "How does the CLI map the mode and grammar flags to telemetry modes?",
-    "How does re-indexing avoid leaving stale chunks behind?",
+    # navigation (10) — tight file/symbol patterns
+    _bq("Where is the telemetry transaction schema defined?", r"telemetry"),
+    _bq("Which function extracts the AST skeleton from a Python file?",
+        r"ast_skeleton|extract_skeleton"),
+    _bq("Open the module that builds the ChatML prompts.", r"prompts"),
+    _bq("Where are the ChromaDB collection names declared?", r"retriever"),
+    _bq("Which script downloads the GGUF model?", r"setup_env|download"),
+    _bq("Where is the markdown frontmatter parsed?", r"markdown_meta"),
+    _bq("Which module defines the RetrievedDoc dataclass?",
+        r"retriever|RetrievedDoc"),
+    _bq("Where is the fixed query battery for the benchmark defined?",
+        r"bench"),
+    _bq("Which file contains the GBNF routing grammar?",
+        r"router\.gbnf|grammars"),
+    _bq("Where is the prompt-token savings percentage computed?", r"bench"),
+    # lookup (10) — file/symbol patterns
+    _bq("What CLI command runs the benchmark?", r"bench"),
+    _bq("What are the columns of the transactions table?",
+        r"telemetry|transactions"),
+    _bq("What is the default context size of the engine?",
+        r"engine|n_ctx|context"),
+    _bq("Which pytest marker excludes GPU tests?", r"gpu|pytest|pyproject"),
+    _bq("What actions does the routing grammar allow?",
+        r"grammar|router|action"),
+    _bq("What is the default number of repetitions per query in the benchmark?",
+        r"bench|reps"),
+    _bq("What is the chunk size limit for raw documents?", r"chunk|index"),
+    _bq("What exit code does the CLI use for invalid arguments?",
+        r"cli|exit"),
+    _bq("Which directories does the indexer always exclude?", r"index"),
+    _bq("What embedding model does the retriever use?",
+        r"retriev|embed|minilm"),
+    # explanation (10) — topic patterns
+    _bq("How does the engine enforce the routing grammar?",
+        r"engine|grammar"),
+    _bq("How does the retriever keep naive and lean comparisons fair?",
+        r"retriev|collection"),
+    _bq("How is TTFT measured during generation?", r"engine|ttft|generat"),
+    _bq("Why are embeddings computed on CPU instead of GPU?",
+        r"retriev|embed|cpu"),
+    _bq("How does telemetry avoid crashing an inference run?", r"telemetry"),
+    _bq("How does the indexer decide which files to skip?", r"index"),
+    _bq("How are oversized documents split into chunks?", r"chunk|index"),
+    _bq("Why does the engine reset the llama context before each generation?",
+        r"engine|context|reset"),
+    _bq("How does the CLI map the mode and grammar flags to telemetry modes?",
+        r"cli|mode"),
+    _bq("How does re-indexing avoid leaving stale chunks behind?", r"index"),
 ]
 
 ARMS = ("naive", "lean", "lean_grammar")
@@ -126,7 +160,8 @@ def run_benchmark(
     db = TelemetryDB(db_path)
     model_name = Path(model_path).name
     snapshots: list[dict] = []
-    for query in QUERY_BATTERY:
+    for bq in QUERY_BATTERY:
+        query = bq.query
         for arm in ARMS:
             retrieval_mode = _ARM_TO_RETRIEVAL_MODE[arm]
             docs = retriever.query(query, mode=retrieval_mode, k=k)
