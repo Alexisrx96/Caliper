@@ -307,7 +307,8 @@ brazo como `target_hit_rate` (columna `hit` en la tabla del bench).
 
 ### 10.2 La brecha estructural compresión→ahorro
 
-El corpus comprime **94.0%** en caracteres (41 archivos) pero el ahorro de
+El corpus comprime **94.0%** en caracteres (la cifra de fase 4 era 93.7%
+sobre 39 archivos; misma métrica, corpus de 41) pero el ahorro de
 prompt intra-run ronda el 30–35%. Dos hechos estructurales lo explican:
 
 1. **La compresión del corpus no llega al prompt tal como se compara**: el
