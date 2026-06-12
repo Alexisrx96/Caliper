@@ -204,6 +204,7 @@ def run_benchmark(
                         response=result.text,
                         format_success=validate_routing_output(result.text),
                         grammar_fallback=result.used_fallback,
+                        target_hit=target_hit(result.text, bq.expect_target),
                     )
     aggregates = _aggregate(db_path, run_id)
     _print_table(aggregates)
@@ -218,12 +219,12 @@ def run_benchmark(
 
 def _aggregate(db_path: str | Path, run_id: str) -> dict[str, dict[str, float]]:
     """Per-arm stats: n, prompt_tokens_mean, prompt_savings_pct (vs naive),
-    ttft_ms_mean, ttft_ms_p50, total_ms_mean, format_success_rate."""
+    ttft_ms_mean, ttft_ms_p50, total_ms_mean, format_success_rate, target_hit_rate."""
     conn = sqlite3.connect(db_path)
     try:
         rows = conn.execute(
             "SELECT mode, prompt_tokens, ttft_ms, total_latency_ms,"
-            " format_success, grammar_fallback FROM transactions"
+            " format_success, grammar_fallback, target_hit FROM transactions"
             " WHERE run_id = ?",
             (run_id,),
         ).fetchall()
@@ -242,6 +243,7 @@ def _aggregate(db_path: str | Path, run_id: str) -> dict[str, dict[str, float]]:
             "total_ms_mean": statistics.fmean(r[3] for r in arm_rows),
             "format_success_rate": statistics.fmean(r[4] for r in arm_rows),
             "grammar_fallback_count": sum(r[5] for r in arm_rows),
+            "target_hit_rate": statistics.fmean(r[6] for r in arm_rows),
         }
     naive_mean = per_arm.get("naive", {}).get("prompt_tokens_mean")
     for stats in per_arm.values():
@@ -256,7 +258,7 @@ def _aggregate(db_path: str | Path, run_id: str) -> dict[str, dict[str, float]]:
 def _print_table(aggregates: dict[str, dict[str, float]]) -> None:
     header = (
         f"{'arm':<14}{'n':>4}{'prompt_tok':>12}{'savings%':>10}"
-        f"{'ttft_ms':>10}{'p50':>8}{'total_ms':>10}{'fmt_ok':>8}"
+        f"{'ttft_ms':>10}{'p50':>8}{'total_ms':>10}{'fmt_ok':>8}{'hit':>7}"
     )
     print(header)
     print("-" * len(header))
@@ -268,7 +270,7 @@ def _print_table(aggregates: dict[str, dict[str, float]]) -> None:
             f"{arm:<14}{s['n']:>4}{s['prompt_tokens_mean']:>12.1f}"
             f"{s['prompt_savings_pct']:>10.1f}{s['ttft_ms_mean']:>10.1f}"
             f"{s['ttft_ms_p50']:>8.1f}{s['total_ms_mean']:>10.1f}"
-            f"{s['format_success_rate']:>8.2f}"
+            f"{s['format_success_rate']:>8.2f}{s['target_hit_rate']:>7.2f}"
         )
 
 

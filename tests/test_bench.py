@@ -1,7 +1,9 @@
 """Bench runner with a fake engine against the fixture tree (no GPU)."""
+import dataclasses
 import json
 import re
 import sqlite3
+import statistics
 
 import pytest
 
@@ -303,3 +305,52 @@ def test_target_hit_malformed_json_is_false_not_raise():
     assert target_hit("", expect) is False
     assert target_hit('{"action": "open_file", "target": 3, "confidence": 0.9}',
                       expect) is False
+
+
+ROUTED = '{"action": "open_file", "target": "lce/telemetry.py", "confidence": 0.9}'
+
+
+class RoutedFakeEngine(FakeEngine):
+    def generate(self, prompt, *, grammar_path=None, max_tokens=128, seed=None,
+                 grammar_first=False):
+        result = super().generate(
+            prompt, grammar_path=grammar_path, max_tokens=max_tokens,
+            seed=seed, grammar_first=grammar_first,
+        )
+        return dataclasses.replace(result, text=ROUTED)
+
+
+def test_target_hit_stored_per_transaction(tmp_path):
+    run_benchmark(
+        "th1",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        engine=FakeEngine(),
+        machine_state_fn=snap_ac,
+    )
+    rows = sqlite3.connect(tmp_path / "logs.db").execute(
+        "SELECT target_hit FROM transactions"
+    ).fetchall()
+    assert len(rows) == len(QUERY_BATTERY) * len(ARMS)
+    assert all(r[0] == 0 for r in rows)  # VALID's target "" matches nothing
+
+
+def test_target_hit_rate_in_aggregates(tmp_path):
+    aggregates = run_benchmark(
+        "th2",
+        db_path=tmp_path / "logs.db",
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=2,
+        engine=RoutedFakeEngine(),
+        machine_state_fn=snap_ac,
+    )
+    expected = statistics.fmean(
+        1.0 if bq.expect_target.search("lce/telemetry.py") else 0.0
+        for bq in QUERY_BATTERY
+    )
+    assert 0.0 < expected < 1.0  # the battery must discriminate this response
+    for arm in ARMS:
+        assert aggregates[arm]["target_hit_rate"] == pytest.approx(expected)
