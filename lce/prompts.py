@@ -18,12 +18,28 @@ SYSTEM_PROMPT = (
 )
 
 
-def build_prompt(query: str, docs: list[RetrievedDoc], mode: str) -> str:
-    """Render the Qwen ChatML prompt for `mode` ('naive' | 'lean')."""
+def build_prompt(
+    query: str,
+    docs: list[RetrievedDoc],
+    mode: str,
+    doc_cap: int | None = None,
+) -> str:
+    """Render the Qwen ChatML prompt for `mode` ('naive' | 'lean').
+
+    doc_cap=N truncates each doc to its first N lines before rendering —
+    lines, not tokens: deterministic and tokenizer-free (phase-5 spec §4).
+    None reproduces the uncapped output byte-for-byte. Validation (N >= 1)
+    lives at the CLI boundary.
+    """
+    texts = [doc.text for doc in docs]
+    if doc_cap is not None:
+        texts = ["\n".join(t.splitlines()[:doc_cap]) for t in texts]
     if mode == "naive":
-        context = "\n\n".join(doc.text for doc in docs)
+        context = "\n\n".join(texts)
     elif mode == "lean":
-        context = "\n\n".join(f"[{doc.doc_id}]\n{doc.text}" for doc in docs)
+        context = "\n\n".join(
+            f"[{doc.doc_id}]\n{t}" for doc, t in zip(docs, texts)
+        )
     else:
         raise ValueError(f"unknown mode {mode!r}; expected 'naive' or 'lean'")
     return (
