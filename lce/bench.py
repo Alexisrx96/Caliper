@@ -122,6 +122,7 @@ def run_benchmark(
     repo_root: str | Path = ".",
     reps: int = 3,
     k: int = 3,
+    doc_cap: int | None = None,
     reindex: bool = False,
     seed: int | None = None,
     engine=None,
@@ -153,6 +154,8 @@ def run_benchmark(
     column. Latency on this hardware swings ~3x with power state, so rows
     carry the state they ran under. grammar_first=True benchmarks the
     pre-phase-4 grammar-first sampler chain (before/after comparisons).
+    doc_cap truncates each retrieved doc to its first N lines at prompt time
+    (both arms identically; one index serves every sweep config — spec §2).
     """
     if machine_state_fn is None:
         from lce.machine_state import snapshot as machine_state_fn
@@ -180,7 +183,7 @@ def run_benchmark(
         for arm in ARMS:
             retrieval_mode = _ARM_TO_RETRIEVAL_MODE[arm]
             docs = retriever.query(query, mode=retrieval_mode, k=k)
-            prompt = build_prompt(query, docs, retrieval_mode)
+            prompt = build_prompt(query, docs, retrieval_mode, doc_cap=doc_cap)
             grammar = GRAMMAR_PATH if arm == "lean_grammar" else None
             for rep in range(reps):
                 rep_seed = None if seed is None else seed + rep

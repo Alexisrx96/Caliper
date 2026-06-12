@@ -117,6 +117,12 @@ def ask(
 def bench(
     run_id: Optional[str] = typer.Option(None, help="defaults to a timestamped id"),
     reps: int = typer.Option(3, help="repetitions per query per arm"),
+    k: int = typer.Option(3, "--k", help="retrieved documents per arm"),
+    doc_cap: Optional[int] = typer.Option(
+        None,
+        "--doc-cap",
+        help="truncate each retrieved doc to its first N lines (prompt-time)",
+    ),
     reindex: bool = typer.Option(False, "--reindex", help="rebuild collections first"),
     model: Path = typer.Option(_DEFAULT_MODEL, help="GGUF model path"),
     persist_dir: Path = typer.Option(Path(".chroma")),
@@ -137,6 +143,13 @@ def bench(
     ),
 ) -> None:
     """Run the fixed query battery through all three arms."""
+    if k < 1:
+        typer.echo(f"error: --k must be >= 1, got {k}", err=True)
+        raise typer.Exit(code=2)
+    if doc_cap is not None and doc_cap < 1:
+        typer.echo(f"error: --doc-cap must be >= 1, got {doc_cap}", err=True)
+        raise typer.Exit(code=2)
+
     from lce.bench import BenchOnBatteryError, run_benchmark
     from lce.engine import EngineLoadError
 
@@ -147,6 +160,8 @@ def bench(
             db_path=db,
             persist_dir=persist_dir,
             reps=reps,
+            k=k,
+            doc_cap=doc_cap,
             reindex=reindex,
             seed=seed,
             allow_battery=allow_battery,

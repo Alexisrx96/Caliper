@@ -171,3 +171,43 @@ def test_bench_on_battery_exits_2(monkeypatch):
     result = runner.invoke(app, ["bench"])
     assert result.exit_code == 2
     assert "--allow-battery" in result.output
+
+
+def test_bench_passes_k_and_doc_cap(monkeypatch):
+    captured = {}
+
+    def fake_run_benchmark(run_id, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("lce.bench.run_benchmark", fake_run_benchmark)
+    result = runner.invoke(app, ["bench", "--k", "1", "--doc-cap", "30"])
+    assert result.exit_code == 0, result.output
+    assert captured["k"] == 1
+    assert captured["doc_cap"] == 30
+
+
+def test_bench_defaults_k3_no_cap(monkeypatch):
+    captured = {}
+
+    def fake_run_benchmark(run_id, **kwargs):
+        captured.update(kwargs)
+        return {}
+
+    monkeypatch.setattr("lce.bench.run_benchmark", fake_run_benchmark)
+    result = runner.invoke(app, ["bench"])
+    assert result.exit_code == 0, result.output
+    assert captured["k"] == 3
+    assert captured["doc_cap"] is None
+
+
+def test_bench_k_zero_exits_2():
+    result = runner.invoke(app, ["bench", "--k", "0"])
+    assert result.exit_code == 2
+    assert "--k" in result.output
+
+
+def test_bench_doc_cap_zero_exits_2():
+    result = runner.invoke(app, ["bench", "--doc-cap", "0"])
+    assert result.exit_code == 2
+    assert "--doc-cap" in result.output

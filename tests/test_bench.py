@@ -354,3 +354,21 @@ def test_target_hit_rate_in_aggregates(tmp_path):
     assert 0.0 < expected < 1.0  # the battery must discriminate this response
     for arm in ARMS:
         assert aggregates[arm]["target_hit_rate"] == pytest.approx(expected)
+
+
+def test_doc_cap_forwarded_to_build_prompt(tmp_path):
+    uncapped, capped = FakeEngine(), FakeEngine()
+    common = dict(
+        persist_dir=tmp_path / "chroma",
+        repo_root="tests/fixtures",
+        reps=1,
+        machine_state_fn=snap_ac,
+    )
+    run_benchmark("dc1", db_path=tmp_path / "a.db", engine=uncapped, **common)
+    run_benchmark("dc2", db_path=tmp_path / "b.db", engine=capped,
+                  doc_cap=1, **common)
+    pairs = list(zip(uncapped.calls, capped.calls))
+    assert all(len(c[0]) <= len(u[0]) for u, c in pairs)
+    assert any(len(c[0]) < len(u[0]) for u, c in pairs), (
+        "capping every doc to 1 line must shrink at least one prompt"
+    )
