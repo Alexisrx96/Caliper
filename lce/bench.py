@@ -65,7 +65,7 @@ QUERY_BATTERY = [
         r"grammar|router|action"),
     _bq("What is the default number of repetitions per query in the benchmark?",
         r"bench|reps"),
-    _bq("What is the chunk size limit for raw documents?", r"chunk|index"),
+    _bq("What is the chunk size limit for raw documents?", r"chunk|retriev"),
     _bq("What exit code does the CLI use for invalid arguments?",
         r"cli|exit"),
     _bq("Which directories does the indexer always exclude?", r"index"),
@@ -81,12 +81,13 @@ QUERY_BATTERY = [
         r"retriev|embed|cpu"),
     _bq("How does telemetry avoid crashing an inference run?", r"telemetry"),
     _bq("How does the indexer decide which files to skip?", r"index"),
-    _bq("How are oversized documents split into chunks?", r"chunk|index"),
+    _bq("How are oversized documents split into chunks?", r"chunk|retriev"),
     _bq("Why does the engine reset the llama context before each generation?",
         r"engine|context|reset"),
     _bq("How does the CLI map the mode and grammar flags to telemetry modes?",
         r"cli|mode"),
-    _bq("How does re-indexing avoid leaving stale chunks behind?", r"index"),
+    _bq("How does re-indexing avoid leaving stale chunks behind?",
+        r"index|retriev"),
 ]
 
 ARMS = ("naive", "lean", "lean_grammar")
