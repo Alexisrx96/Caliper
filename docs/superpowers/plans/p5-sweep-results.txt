@@ -1,0 +1,81 @@
+=== p5-baseline (2026-06-11 22:54:29) ===
+indexed 41 files (0 skipped)
+llama_context: n_ctx_seq (4096) < n_ctx_train (32768) -- the full capacity of the model will not be utilized
+arm              n  prompt_tok  savings%   ttft_ms     p50  total_ms  fmt_ok    hit
+-----------------------------------------------------------------------------------
+naive           90       967.8       0.0     451.4   443.1    1057.1    0.82   0.61
+lean            90       651.8      32.7     294.2   279.0     745.6    1.00   0.71
+lean_grammar    90       651.8      32.7     291.3   276.9     740.3    1.00   0.71
+
+kind         raw_chars    skeleton  reduction%
+----------------------------------------------
+code            111814       17474        84.4
+doc             275865        5853        97.9
+overall         387679       23327        94.0
+
+machine: battery transactions 0/270; gpu sm clocks 1492-2010 MHz
+=== p5-baseline exit=0 ===
+=== p5-k2 (2026-06-11 23:00:34) ===
+llama_context: n_ctx_seq (4096) < n_ctx_train (32768) -- the full capacity of the model will not be utilized
+arm              n  prompt_tok  savings%   ttft_ms     p50  total_ms  fmt_ok    hit
+-----------------------------------------------------------------------------------
+naive           90       645.7       0.0     298.1   300.4     850.3    0.86   0.71
+lean            90       451.8      30.0     204.6   187.4     683.3    0.99   0.66
+lean_grammar    90       451.8      30.0     202.4   186.2     678.7    0.99   0.66
+
+kind         raw_chars    skeleton  reduction%
+----------------------------------------------
+code            111814       17474        84.4
+doc             275865        5853        97.9
+overall         387679       23327        94.0
+
+machine: battery transactions 0/270; gpu sm clocks 1447-1972 MHz
+=== p5-k2 exit=0 ===
+=== p5-k1 (2026-06-11 23:05:02) ===
+llama_context: n_ctx_seq (4096) < n_ctx_train (32768) -- the full capacity of the model will not be utilized
+arm              n  prompt_tok  savings%   ttft_ms     p50  total_ms  fmt_ok    hit
+-----------------------------------------------------------------------------------
+naive           90       347.4       0.0     159.6   149.3     615.5    0.96   0.68
+lean            90       226.5      34.8     103.1    92.4     507.9    1.00   0.64
+lean_grammar    90       226.5      34.8     102.1    91.5     506.5    1.00   0.64
+
+kind         raw_chars    skeleton  reduction%
+----------------------------------------------
+code            111814       17474        84.4
+doc             275865        5853        97.9
+overall         387679       23327        94.0
+
+machine: battery transactions 0/270; gpu sm clocks 1657-1972 MHz
+=== p5-k1 exit=0 ===
+=== p5-k3-cap30 (2026-06-11 23:08:33) ===
+llama_context: n_ctx_seq (4096) < n_ctx_train (32768) -- the full capacity of the model will not be utilized
+arm              n  prompt_tok  savings%   ttft_ms     p50  total_ms  fmt_ok    hit
+-----------------------------------------------------------------------------------
+naive           90       798.7       0.0     369.3   370.4     916.7    0.87   0.71
+lean            90       643.6      19.4     292.6   277.2     736.9    1.00   0.69
+lean_grammar    90       643.6      19.4     290.2   274.7     734.0    1.00   0.69
+
+kind         raw_chars    skeleton  reduction%
+----------------------------------------------
+code            111814       17474        84.4
+doc             275865        5853        97.9
+overall         387679       23327        94.0
+
+machine: battery transactions 0/270; gpu sm clocks 1380-1972 MHz
+=== p5-k3-cap30 exit=0 ===
+=== p5-k1-cap30 (2026-06-11 23:13:10) ===
+llama_context: n_ctx_seq (4096) < n_ctx_train (32768) -- the full capacity of the model will not be utilized
+arm              n  prompt_tok  savings%   ttft_ms     p50  total_ms  fmt_ok    hit
+-----------------------------------------------------------------------------------
+naive           90       292.4       0.0     136.0   129.0     579.1    0.98   0.71
+lean            90       230.1      21.3     105.2    92.4     511.3    1.00   0.64
+lean_grammar    90       230.1      21.3     104.3    92.0     510.7    1.00   0.64
+
+kind         raw_chars    skeleton  reduction%
+----------------------------------------------
+code            111814       17474        84.4
+doc             275865        5853        97.9
+overall         387679       23327        94.0
+
+machine: battery transactions 0/270; gpu sm clocks 1627-1957 MHz
+=== p5-k1-cap30 exit=0 ===
