@@ -5,6 +5,7 @@ the engine are injectable so tests can run without a GPU.
 """
 from __future__ import annotations
 
+import json
 import re
 import sqlite3
 import statistics
@@ -89,6 +90,19 @@ QUERY_BATTERY = [
     _bq("How does re-indexing avoid leaving stale chunks behind?",
         r"index|retriev"),
 ]
+
+
+def target_hit(text: str, expect: re.Pattern[str]) -> bool:
+    """True iff `text` is valid routing JSON and `expect` matches its target.
+
+    Never raises — malformed output is data scoring 0 (a format failure is
+    automatically a target miss). Matches via re.search against the
+    "target" string only (spec §4).
+    """
+    if not validate_routing_output(text):
+        return False
+    return expect.search(json.loads(text)["target"]) is not None
+
 
 ARMS = ("naive", "lean", "lean_grammar")
 

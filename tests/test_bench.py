@@ -12,6 +12,7 @@ from lce.bench import (
     BenchOnBatteryError,
     corpus_compression,
     run_benchmark,
+    target_hit,
 )
 from lce.engine import GenerationResult
 from lce.indexer import index_tree
@@ -275,3 +276,30 @@ def test_grammar_fallback_count_in_aggregates(tmp_path):
     )
     for arm in ARMS:
         assert aggregates[arm]["grammar_fallback_count"] == 0
+
+
+def test_target_hit_matching_target():
+    expect = re.compile(r"telemetry", re.IGNORECASE)
+    text = '{"action": "open_file", "target": "lce/telemetry.py", "confidence": 0.9}'
+    assert target_hit(text, expect) is True
+
+
+def test_target_hit_wrong_target():
+    expect = re.compile(r"telemetry", re.IGNORECASE)
+    text = '{"action": "open_file", "target": "lce/prompts.py", "confidence": 0.9}'
+    assert target_hit(text, expect) is False
+
+
+def test_target_hit_case_insensitive():
+    expect = re.compile(r"telemetry", re.IGNORECASE)
+    text = '{"action": "open_file", "target": "LCE/Telemetry.PY", "confidence": 0.9}'
+    assert target_hit(text, expect) is True
+
+
+def test_target_hit_malformed_json_is_false_not_raise():
+    expect = re.compile(r"telemetry", re.IGNORECASE)
+    assert target_hit("not json at all", expect) is False
+    assert target_hit('{"target": "telemetry"}', expect) is False  # missing keys
+    assert target_hit("", expect) is False
+    assert target_hit('{"action": "open_file", "target": 3, "confidence": 0.9}',
+                      expect) is False
