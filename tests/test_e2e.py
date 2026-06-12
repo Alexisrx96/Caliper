@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from lce.bench import QUERY_BATTERY, target_hit
 from lce.engine import Engine, validate_routing_output
 from lce.indexer import index_tree
 from lce.prompts import build_prompt
@@ -27,6 +28,9 @@ def test_three_arms_end_to_end(tmp_path):
     engine = Engine(MODEL)
     db = TelemetryDB(tmp_path / "logs.db")
     query = "Where is the telemetry transaction schema defined?"
+    expect = next(
+        bq.expect_target for bq in QUERY_BATTERY if bq.query == query
+    )
     prompt_tokens: dict[str, int] = {}
     texts: dict[str, str] = {}
     for arm, grammar in ARMS:
@@ -57,6 +61,9 @@ def test_three_arms_end_to_end(tmp_path):
             )
         prompt_tokens[arm] = result.prompt_tokens
         texts[arm] = result.text
+        assert target_hit(result.text, expect), (
+            f"{arm}: routing target must name telemetry; got {result.text!r}"
+        )
         assert result.used_fallback is False, (
             f"{arm}: sample-then-validate must not need a rescue here"
         )
@@ -77,7 +84,7 @@ def test_three_arms_end_to_end(tmp_path):
 
 @pytest.mark.gpu
 def test_unseeded_grammar_battery_never_aborts(tmp_path):
-    from lce.bench import GRAMMAR_PATH, QUERY_BATTERY
+    from lce.bench import GRAMMAR_PATH
 
     retriever = Retriever(tmp_path / "chroma")
     index_tree(retriever, ".")
