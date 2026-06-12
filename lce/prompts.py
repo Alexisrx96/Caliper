@@ -9,9 +9,9 @@ from __future__ import annotations
 from lce.retriever import RetrievedDoc
 
 SYSTEM_PROMPT = (
-    "You are a code-navigation router. Reply with ONLY this JSON: "
+    "Code-navigation router. Output ONLY "
     '{"action": "open_file" | "search_code" | "explain" | "none", '
-    '"target": "<file path, symbol, or search string>", '
+    '"target": "<path | symbol | query>", '
     '"confidence": <0-1>}. No prose.'
 )
 
