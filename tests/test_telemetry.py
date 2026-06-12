@@ -148,3 +148,49 @@ def test_record_defaults_are_null_state_and_no_fallback(tmp_path):
     ).fetchone()
     conn.close()
     assert row == (None, 0)
+
+
+def test_phase4_db_gains_target_hit_column(tmp_path):
+    path = tmp_path / "p4.db"
+    conn = sqlite3.connect(path)
+    with conn:
+        conn.executescript(PHASE3_SCHEMA)
+        conn.execute("ALTER TABLE transactions ADD COLUMN machine_state TEXT")
+        conn.execute("ALTER TABLE transactions ADD COLUMN grammar_fallback"
+                     " INTEGER NOT NULL DEFAULT 0")
+        conn.execute(
+            "INSERT INTO transactions (run_id, ts, mode, model, query)"
+            " VALUES ('r0', 't0', 'lean', 'm', 'q')"
+        )
+    conn.close()
+    TelemetryDB(path)  # opening migrates
+    TelemetryDB(path)  # idempotent
+    assert "target_hit" in _columns(path)
+    conn = sqlite3.connect(path)
+    (hit,) = conn.execute("SELECT target_hit FROM transactions").fetchone()
+    conn.close()
+    assert hit is None  # pre-phase-5 rows stay NULL
+
+
+def test_record_roundtrips_target_hit(tmp_path):
+    path = tmp_path / "th.db"
+    db = TelemetryDB(path)
+    with db.record(run_id="r", mode="lean", model="m", query="q") as rec:
+        rec.set_result(prompt_tokens=1, completion_tokens=2, ttft_ms=3.0,
+                       response="x", format_success=True, target_hit=True)
+    conn = sqlite3.connect(path)
+    (hit,) = conn.execute("SELECT target_hit FROM transactions").fetchone()
+    conn.close()
+    assert hit == 1
+
+
+def test_record_target_hit_defaults_to_null(tmp_path):
+    path = tmp_path / "thn.db"
+    db = TelemetryDB(path)
+    with db.record(run_id="r", mode="lean", model="m", query="q") as rec:
+        rec.set_result(prompt_tokens=1, completion_tokens=2, ttft_ms=3.0,
+                       response="x", format_success=True)
+    conn = sqlite3.connect(path)
+    (hit,) = conn.execute("SELECT target_hit FROM transactions").fetchone()
+    conn.close()
+    assert hit is None

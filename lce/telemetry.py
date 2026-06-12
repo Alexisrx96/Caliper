@@ -37,6 +37,7 @@ _MIGRATIONS = {
         "ALTER TABLE transactions"
         " ADD COLUMN grammar_fallback INTEGER NOT NULL DEFAULT 0"
     ),
+    "target_hit": "ALTER TABLE transactions ADD COLUMN target_hit INTEGER",
 }
 
 
@@ -50,6 +51,7 @@ class TransactionRecord:
         self.response: str | None = None
         self.format_success: bool | None = None
         self.grammar_fallback: bool = False
+        self.target_hit: bool | None = None
 
     def set_result(
         self,
@@ -60,6 +62,7 @@ class TransactionRecord:
         response: str,
         format_success: bool,
         grammar_fallback: bool = False,
+        target_hit: bool | None = None,
     ) -> None:
         self.prompt_tokens = prompt_tokens
         self.completion_tokens = completion_tokens
@@ -67,6 +70,7 @@ class TransactionRecord:
         self.response = response
         self.format_success = format_success
         self.grammar_fallback = grammar_fallback
+        self.target_hit = target_hit
 
 
 class TelemetryDB:
@@ -113,8 +117,8 @@ class TelemetryDB:
                             " model, query, prompt_tokens,"
                             " completion_tokens, ttft_ms, total_latency_ms,"
                             " format_success, response, machine_state,"
-                            " grammar_fallback)"
-                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                            " grammar_fallback, target_hit)"
+                            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                             (
                                 run_id,
                                 ts,
@@ -133,6 +137,9 @@ class TelemetryDB:
                                 if machine_state is None
                                 else json.dumps(machine_state),
                                 int(rec.grammar_fallback),
+                                None
+                                if rec.target_hit is None
+                                else int(rec.target_hit),
                             ),
                         )
                 finally:
